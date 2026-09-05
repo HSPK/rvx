@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - id: version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: python scripts/release_version.py >> "$GITHUB_OUTPUT"
+
+  web:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: npm --prefix web run check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rvx-web
+          path: web/dist/
+          if-no-files-found: error
+
+  wheels:
+    name: Wheel (${{ matrix.name }})
+    needs: [version, web]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_x86_64:latest
+            platform: manylinux_2_28_x86_64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_aarch64:latest
+            platform: manylinux_2_28_aarch64
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            platform: macosx_11_0_arm64
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macosx_11_0_x86_64
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rvx-web
+          path: web/dist
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - name: Build Linux executable and extension in the same manylinux image
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380 # v1.49.4
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: "1.98.1"
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          container: ${{ matrix.container }}
+          args: --release --locked --out dist --interpreter python3.11
+          before-script-linux: |
+            cargo build --locked --release --target ${{ matrix.target }} -p rvx-server
+            /opt/python/cp311-cp311/bin/python scripts/package_assets.py \
+              --binary target/${{ matrix.target }}/release/rvxd --ui web/dist
+      - name: Build macOS executable and stage complete package assets
+        if: runner.os == 'macOS'
+        env:
+          RUST_TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup target add --toolchain 1.98.1 "$RUST_TARGET"
+          cargo build --locked --release --target "$RUST_TARGET" -p rvx-server
+          python scripts/package_assets.py --binary "target/$RUST_TARGET/release/rvxd" --ui web/dist
+      - name: Build macOS mixed wheel
+        if: runner.os == 'macOS'
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380 # v1.49.4
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: "1.98.1"
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --interpreter python3.11 --compatibility pypi
+      - name: Verify complete wheel and platform contract
+        env:
+          PACKAGE_VERSION: ${{ needs.version.outputs.version }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: python scripts/check_wheel.py --version "$PACKAGE_VERSION" --platform "$EXPECTED_PLATFORM" dist/*.whl
+      - name: Install and run outside the checkout without build tools
+        run: |
+          python -m venv .build/wheel-smoke
+          .build/wheel-smoke/bin/python -m pip install --no-deps --no-index dist/*.whl
+          smoke_python="$GITHUB_WORKSPACE/.build/wheel-smoke/bin/python"
+          cd "$(mktemp -d)"
+          "$smoke_python" "$GITHUB_WORKSPACE/scripts/smoke_package.py"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rvx-wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [version, wheels]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/rvx/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: rvx-wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/
+          attestations: true
