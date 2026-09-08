@@ -60,7 +60,7 @@ class InstalledWheelTests(unittest.TestCase):
     def start_daemon(self, command, directory):
         process = subprocess.Popen(
             [*command, "--data-dir", str(directory / "data"), "--listen", "127.0.0.1:0",
-             "--hot-capacity", "32", "--scrape-concurrency", "2"],
+             "--scrape-concurrency", "2"],
             cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={**os.environ, "PATH": str(SCRIPTS), "PYTHONPATH": ""},
         )

@@ -4,17 +4,12 @@ mod source;
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 use rvx_core::{
-    QueryRequest, RunStatus, SnapshotDiffRequest, SnapshotHistoryRequest, SnapshotLatestRequest,
-    SnapshotQueryRequest, SourceRegistration, SourceState, SummaryRequest,
+    ChartCatalogRequest, RunStatus, SnapshotDiffRequest, SnapshotHistoryRequest,
+    SnapshotLatestRequest, SnapshotQueryRequest, SourceRegistration, SourceState,
 };
 use rvx_engine::Engine;
 use tokio::runtime::{Builder, Runtime};
@@ -38,22 +33,19 @@ impl RvxEngine {
     #[new]
     #[pyo3(signature = (
         data_directory,
-        hot_capacity=1_000_000,
         scrape_concurrency=256,
         auto_start=true
     ))]
-    fn new(
-        data_directory: String,
-        hot_capacity: usize,
-        scrape_concurrency: usize,
-        auto_start: bool,
-    ) -> PyResult<Self> {
+    fn new(data_directory: String, scrape_concurrency: usize, auto_start: bool) -> PyResult<Self> {
         let runtime = Builder::new_multi_thread()
             .enable_all()
             .thread_name("rvx-engine")
             .build()
             .map_err(runtime_error)?;
-        let engine = Engine::open(data_directory, hot_capacity).map_err(runtime_error)?;
+        if scrape_concurrency == 0 {
+            return Err(runtime_error("scrape_concurrency must be positive"));
+        }
+        let engine = Engine::open(data_directory).map_err(runtime_error)?;
         let instance = Self {
             engine,
             lifecycle: Mutex::new(RuntimeState {
@@ -271,33 +263,23 @@ impl RvxEngine {
         .map_err(runtime_error)
     }
 
-    /// Read only numeric data recorded by a pre-snapshot deployment.
-    fn legacy_query_json(&self, py: Python<'_>, payload: String) -> PyResult<String> {
+    /// Return bounded field discovery and latest Source summaries as JSON without holding Python's GIL.
+    fn chart_catalog(&self, py: Python<'_>, payload: String) -> PyResult<String> {
         py.allow_threads(|| {
-            let request: QueryRequest = serde_json::from_str(&payload)?;
-            serde_json::to_string(&self.engine.query(&request)?)
+            let request: ChartCatalogRequest = serde_json::from_str(&payload)?;
+            serde_json::to_string(&self.engine.chart_catalog(&request)?)
                 .map_err(rvx_engine::EngineError::from)
         })
         .map_err(runtime_error)
     }
 
-    fn legacy_query_summaries_json(&self, py: Python<'_>, payload: String) -> PyResult<String> {
+    /// Return the original observation as JSON so a projected chart point can be inspected without losing state.
+    fn snapshot_get(&self, py: Python<'_>, id: i64) -> PyResult<String> {
         py.allow_threads(|| {
-            let request: SummaryRequest = serde_json::from_str(&payload)?;
-            serde_json::to_string(&self.engine.query_summaries(&request)?)
+            serde_json::to_string(&self.engine.snapshot_get(id)?)
                 .map_err(rvx_engine::EngineError::from)
         })
         .map_err(runtime_error)
-    }
-
-    fn legacy_query_arrow<'py>(&self, py: Python<'py>, payload: String) -> PyResult<&'py PyBytes> {
-        let encoded = py
-            .allow_threads(|| {
-                let request: QueryRequest = serde_json::from_str(&payload)?;
-                query_arrow_bytes(self.engine.query(&request)?)
-            })
-            .map_err(runtime_error)?;
-        Ok(PyBytes::new(py, &encoded))
     }
 
     fn stats_json(&self, py: Python<'_>) -> PyResult<String> {
@@ -332,58 +314,6 @@ impl RvxEngine {
 
 fn runtime_error(error: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
-}
-
-fn query_arrow_bytes(response: rvx_core::QueryResponse) -> rvx_engine::Result<Vec<u8>> {
-    let rows = response
-        .series
-        .iter()
-        .map(|series| series.values.len())
-        .sum();
-    let mut source_ids = Vec::with_capacity(rows);
-    let mut session_ids = Vec::with_capacity(rows);
-    let mut sequences = Vec::with_capacity(rows);
-    let mut axes = Vec::with_capacity(rows);
-    let mut event_times = Vec::with_capacity(rows);
-    let mut metrics = Vec::with_capacity(rows);
-    let mut values = Vec::with_capacity(rows);
-    for series in response.series {
-        for index in 0..series.values.len() {
-            source_ids.push(series.source_id.clone());
-            session_ids.push(series.source_session_ids[index].clone());
-            sequences.push(series.sequences[index]);
-            axes.push(series.axes[index]);
-            event_times.push(series.event_time_ns[index]);
-            metrics.push(series.metric.clone());
-            values.push(series.values[index]);
-        }
-    }
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("source_id", DataType::Utf8, false),
-        Field::new("source_session_id", DataType::Utf8, false),
-        Field::new("sequence", DataType::UInt64, false),
-        Field::new("axis", DataType::Int64, false),
-        Field::new("event_time_ns", DataType::Int64, false),
-        Field::new("metric", DataType::Utf8, false),
-        Field::new("value", DataType::Float64, false),
-    ]));
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(source_ids)),
-        Arc::new(StringArray::from(session_ids)),
-        Arc::new(UInt64Array::from(sequences)),
-        Arc::new(Int64Array::from(axes)),
-        Arc::new(Int64Array::from(event_times)),
-        Arc::new(StringArray::from(metrics)),
-        Arc::new(Float64Array::from(values)),
-    ];
-    let batch = RecordBatch::try_new(schema.clone(), columns)?;
-    let mut encoded = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut encoded, &schema)?;
-        writer.write(&batch)?;
-        writer.finish()?;
-    }
-    Ok(encoded)
 }
 
 #[pymodule]

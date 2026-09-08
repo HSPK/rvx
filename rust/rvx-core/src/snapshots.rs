@@ -128,6 +128,7 @@ pub struct SnapshotQuerySeries {
     pub run_id: String,
     pub source_id: String,
     pub path: String,
+    pub snapshot_ids: Vec<i64>,
     pub source_session_ids: Vec<String>,
     pub sequences: Vec<u64>,
     pub axes: Vec<i64>,
@@ -139,6 +140,60 @@ pub struct SnapshotQuerySeries {
 pub struct SnapshotQueryResponse {
     pub axis: String,
     pub series: Vec<SnapshotQuerySeries>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChartCatalogRequest {
+    pub run_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChartRunInfo {
+    pub run_id: String,
+    pub snapshot_count: u64,
+    pub first_observed_at_ns: Option<i64>,
+    pub last_observed_at_ns: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChartGroup {
+    Training,
+    Throughput,
+    Pipeline,
+    Resources,
+    Other,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChartMetricSource {
+    pub run_id: String,
+    pub source_id: String,
+    pub label: String,
+    pub role: String,
+    pub rank: Option<i64>,
+    pub node_id: Option<String>,
+    pub primary: bool,
+    pub latest_value: Option<f64>,
+    pub observed_at_ns: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChartMetric {
+    pub path: String,
+    pub name: String,
+    pub group: ChartGroup,
+    pub unit: Option<String>,
+    pub run_ids: Vec<String>,
+    pub sources: Vec<ChartMetricSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChartCatalogResponse {
+    pub runs: Vec<ChartRunInfo>,
+    pub metrics: Vec<ChartMetric>,
+    pub defaults: Vec<String>,
+    pub axes: Vec<String>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -246,7 +301,7 @@ pub fn validate_state_snapshot(snapshot: &StateSnapshot) -> Result<()> {
             "sequence exceeds durable cursor range".into(),
         ));
     }
-    if snapshot.axes.len() > crate::MAX_AXES_PER_POINT {
+    if snapshot.axes.len() > crate::MAX_SNAPSHOT_AXES {
         return Err(ProtocolError::TooManyAxes);
     }
     let mut stack = vec![(&snapshot.state, 0)];

@@ -1,10 +1,8 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::OriginalUri;
 use axum::http::{header, StatusCode};
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use reqwest::Client;
@@ -13,6 +11,11 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+#[path = "http/tables.rs"]
+mod table_tests;
+#[path = "http/snapshot_views.rs"]
+mod snapshot_view_tests;
 
 struct Server {
     url: String,
@@ -65,7 +68,7 @@ impl Fixture {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.build");
         std::fs::create_dir_all(&root).unwrap();
         let directory = tempfile::tempdir_in(root).unwrap();
-        let engine = Engine::open(directory.path().join("data"), 100).unwrap();
+        let engine = Engine::open(directory.path().join("data")).unwrap();
         let ui = directory.path().join("ui");
         std::fs::create_dir_all(ui.join("assets")).unwrap();
         std::fs::write(ui.join("index.html"), "<!doctype html><title>RVX</title>").unwrap();
@@ -73,13 +76,8 @@ impl Fixture {
         Self { directory, engine }
     }
 
-    fn router(&self, hostmon_url: &str) -> Router {
-        rvx_server::application(
-            self.engine.clone(),
-            self.directory.path().join("ui"),
-            hostmon_url,
-        )
-        .unwrap()
+    fn router(&self) -> Router {
+        rvx_server::application(self.engine.clone(), self.directory.path().join("ui")).unwrap()
     }
 }
 
@@ -90,6 +88,142 @@ fn client() -> Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn authenticated_ui_and_api_allow_remote_same_origin_without_exposing_anonymous_data() {
+    const TOKEN: &str = "fixture-token-0123456789abcdef0123456789abcdef";
+    let fixture = Fixture::new();
+    fixture.engine.create_project("private-project").unwrap();
+    let router = rvx_server::application_with_access(
+        fixture.engine.clone(),
+        fixture.directory.path().join("ui"),
+        rvx_server::AccessPolicy::authenticated(TOKEN, None).unwrap(),
+    )
+    .unwrap();
+    let server = Server::start(router).await;
+    let client = client();
+    for path in [
+        "/",
+        "/rvx",
+        "/assets/app.js",
+        "/healthz",
+        "/api/experiments/projects",
+        "/api/status",
+    ] {
+        let response = client
+            .get(format!("{}{path}", server.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        assert!(response.headers()[header::WWW_AUTHENTICATE]
+            .to_str()
+            .unwrap()
+            .starts_with("Bearer "));
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!response.text().await.unwrap().contains("private-project"));
+    }
+    let incorrect = client
+        .get(format!("{}/api/experiments/projects", server.url))
+        .basic_auth("rvx", Some("wrong-password"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(incorrect.status(), StatusCode::UNAUTHORIZED);
+
+    for path in [
+        "/rvx",
+        "/assets/app.js",
+        "/healthz",
+        "/api/experiments/projects",
+    ] {
+        let response = client
+            .get(format!("{}{path}", server.url))
+            .header(header::HOST, "192.0.2.10:9110")
+            .basic_auth("rvx", Some(TOKEN))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+    }
+    let remote = client
+        .post(format!("{}/api/snapshots/latest", server.url))
+        .header(header::HOST, "192.0.2.10:9110")
+        .header(header::ORIGIN, "http://192.0.2.10:9110")
+        .header("sec-fetch-site", "same-origin")
+        .bearer_auth(TOKEN)
+        .json(&json!({"run_id":"no-observations-yet"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(remote.status(), StatusCode::OK);
+    assert_eq!(
+        remote.json::<Value>().await.unwrap()["snapshots"],
+        json!([])
+    );
+    let cross_site = client
+        .post(format!("{}/api/snapshots/latest", server.url))
+        .header(header::HOST, "192.0.2.10:9110")
+        .header(header::ORIGIN, "https://untrusted.example")
+        .basic_auth("rvx", Some(TOKEN))
+        .json(&json!({"run_id":"run"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+    let cli = client
+        .get(format!("{}/api/experiments/projects", server.url))
+        .header(header::HOST, "192.0.2.10:9110")
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cli.status(), StatusCode::OK);
+    assert_eq!(
+        cli.json::<Value>().await.unwrap()["projects"][0]["name"],
+        "private-project"
+    );
+    server.close().await;
+}
+
+#[tokio::test]
+async fn authenticated_https_proxy_requires_the_explicit_public_origin() {
+    const TOKEN: &str = "fixture-token-0123456789abcdef0123456789abcdef";
+    let fixture = Fixture::new();
+    let router = rvx_server::application_with_access(
+        fixture.engine.clone(),
+        fixture.directory.path().join("ui"),
+        rvx_server::AccessPolicy::authenticated(TOKEN, Some("https://rvx.example")).unwrap(),
+    )
+    .unwrap();
+    let server = Server::start(router).await;
+    let client = client();
+    let accepted = client
+        .post(format!("{}/api/snapshots/latest", server.url))
+        .header(header::ORIGIN, "https://rvx.example")
+        .bearer_auth(TOKEN)
+        .json(&json!({"run_id":"run"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let rejected = client
+        .post(format!("{}/api/snapshots/latest", server.url))
+        .header(header::ORIGIN, "http://rvx.example")
+        .bearer_auth(TOKEN)
+        .header("x-forwarded-proto", "https")
+        .json(&json!({"run_id":"run"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    server.close().await;
 }
 
 #[tokio::test]
@@ -156,18 +290,21 @@ async fn snapshot_pull_and_read_apis_preserve_structured_state_without_metric_wr
     assert!(!fixture.directory.path().join("data/metrics.wal").exists());
     let stats = fixture.engine.stats().unwrap();
     assert_eq!(stats.snapshots, 2);
-    assert_eq!(stats.ingested_points, 0);
-    assert_eq!(stats.wal_bytes, 0);
-    let server = Server::start(fixture.router("http://127.0.0.1:1")).await;
+    assert_eq!(
+        serde_json::to_value(stats)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        8
+    );
+    let server = Server::start(fixture.router()).await;
     let client = client();
     let mut results = Vec::new();
     for (route, request) in [
         ("latest", json!({"run_id":run.id})),
         ("history", json!({"run_id":run.id,"limit":1})),
-        (
-            "query",
-            json!({"run_ids":[run.id],"paths":["/loss","/removed"]}),
-        ),
+        ("query", json!({"run_ids":[run.id],"paths":["/loss"]})),
         ("diff", json!({"before_id":1,"after_id":2})),
     ] {
         let url = format!("{}/api/snapshots/{route}", server.url);
@@ -191,6 +328,41 @@ async fn snapshot_pull_and_read_apis_preserve_structured_state_without_metric_wr
     assert_eq!(results[1]["next_before_id"], 2);
     assert_eq!(results[2]["axis"], "wall_time");
     assert_eq!(results[2]["series"][0]["values"], json!([2.0, null]));
+    assert_eq!(results[2]["series"][0]["snapshot_ids"], json!([1, 2]));
+    let raw: Value = client
+        .get(format!("{}/api/snapshots/1", server.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(raw["sequence"], 0);
+    assert_eq!(raw["state"]["loss"], 2.0);
+    let catalog: Value = client
+        .post(format!("{}/api/charts/catalog", server.url))
+        .json(&json!({"run_ids":[run.id]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(catalog["defaults"], json!(["/loss"]));
+    assert_eq!(
+        catalog["metrics"][0]["sources"][0]["latest_value"],
+        Value::Null
+    );
+    let elapsed: Value = client
+        .post(format!("{}/api/snapshots/query", server.url))
+        .json(&json!({"run_ids":[run.id],"paths":["/loss"],"axis":"elapsed"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(elapsed["series"][0]["axes"], json!([0, 10]));
     assert!(results[3]["changes"]
         .as_array()
         .unwrap()
@@ -199,6 +371,7 @@ async fn snapshot_pull_and_read_apis_preserve_structured_state_without_metric_wr
         ("history", json!({"run_id":run.id,"limit":257})),
         ("latest", json!({"run_id":run.id,"limit":0})),
         ("query", json!({"run_ids":[run.id],"paths":["/bad~2"]})),
+        ("query", json!({"run_ids":[run.id],"paths":["/removed"]})),
         ("diff", json!({"before_id":1,"after_id":999})),
     ] {
         let response = client
@@ -216,7 +389,7 @@ async fn snapshot_pull_and_read_apis_preserve_structured_state_without_metric_wr
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
     producer.close().await;
     server.close().await;
@@ -236,7 +409,7 @@ async fn create(client: &Client, server: &Server, kind: &str, payload: Value) ->
 #[tokio::test]
 async fn static_routes_and_native_management_are_independent() {
     let fixture = Fixture::new();
-    let server = Server::start(fixture.router("http://127.0.0.1:1")).await;
+    let server = Server::start(fixture.router()).await;
     let client = client();
     for path in [
         "/rvx",
@@ -329,30 +502,14 @@ async fn static_routes_and_native_management_are_independent() {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.json::<Value>().await.unwrap()[field], value);
     }
-    for (route, payload, field) in [
-        (
-            "query",
-            json!({"run_id": run["id"], "metrics": ["loss"], "max_points": 10}),
-            "series",
-        ),
-        (
-            "query-summaries",
-            json!({"run_ids": [run["id"]], "metrics": ["loss"]}),
-            "summaries",
-        ),
-    ] {
+    for route in ["query", "query-summaries"] {
         let response = client
             .post(format!("{}/api/experiments/{route}", server.url))
-            .json(&payload)
+            .json(&json!({"run_ids": [run["id"]]}))
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.json::<Value>().await.unwrap();
-        assert!(body[field].is_array());
-        if route == "query" {
-            assert_eq!(body["axis"], "wall_time");
-        }
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
     for path in [
         "/api/no-such-route",
@@ -400,39 +557,33 @@ async fn static_routes_and_native_management_are_independent() {
 }
 
 #[tokio::test]
-async fn legacy_ui_bookmarks_redirect_on_origin_with_exact_queries() {
+async fn removed_routes_do_not_redirect_or_proxy() {
     let fixture = Fixture::new();
-    let server = Server::start(fixture.router("http://127.0.0.1:1")).await;
+    let server = Server::start(fixture.router()).await;
     let client = client();
     for path in [
         "/ryx",
         "/ryx/",
-        "/ryx?filter=running%20jobs&filter=x+y",
-        "/ryx/projects/project%201/experiments/experiment-1?filter=a%2Fb",
-        "/ryx/workspace?runs=run-1%2Crun-2&return=%2Fryx%2Fruns",
-        "/ryx/workspace?runs=run-1&return=https%3A%2F%2Fevil.example",
-        "/ryx//evil.example/runs?next=https://evil.example",
-    ] {
-        for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
-            let response = client
-                .request(method, format!("{}{path}", server.url))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT, "{path}");
-            let location = response.headers()[header::LOCATION].to_str().unwrap();
-            assert_eq!(location, format!("/rvx{}", &path[4..]));
-            let target = reqwest::Url::parse(&server.url).unwrap().join(location).unwrap();
-            assert_eq!(target.origin(), reqwest::Url::parse(&server.url).unwrap().origin());
-        }
-    }
-    for path in [
+        "/ryx/workspace",
+        "/hostmon",
+        "/api/hostmon",
+        "/api/status",
+        "/api/catalog",
+        "/api/collectors",
+        "/api/rules",
+        "/api/plugins/cluster_gpu_usage",
+        "/api/experiments/query",
+        "/api/experiments/query-summaries",
         "/ryx-other",
         "/api/ryx",
         "/api/no-such-route",
         "/assets/missing.js",
     ] {
-        let response = client.get(format!("{}{path}", server.url)).send().await.unwrap();
+        let response = client
+            .get(format!("{}{path}", server.url))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         assert!(!response.headers().contains_key(header::LOCATION));
         assert!(!response.text().await.unwrap().contains("<!doctype html>"));
@@ -441,150 +592,9 @@ async fn legacy_ui_bookmarks_redirect_on_origin_with_exact_queries() {
 }
 
 #[tokio::test]
-async fn hostmon_proxy_is_read_only_exact_and_preserves_upstream_errors() {
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = requests.clone();
-    let upstream = Server::start(Router::new().fallback(get(
-        move |OriginalUri(uri): OriginalUri| {
-            let seen = seen.clone();
-            async move {
-                seen.lock().unwrap().push(uri.to_string());
-                if uri.path() == "/monitor/api/rules" {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({"error": "fixture"})),
-                    )
-                        .into_response();
-                }
-                if uri.path() == "/monitor/api/collectors" {
-                    return (StatusCode::FOUND, [(header::LOCATION, "/api/control")])
-                        .into_response();
-                }
-                Json(json!({"path": uri.path(), "query": uri.query()})).into_response()
-            }
-        },
-    )))
-    .await;
-    let fixture = Fixture::new();
-    let hostmon_url = format!("{}/monitor", upstream.url);
-    let server = Server::start(fixture.router(&hostmon_url)).await;
-    let client = client();
-    for path in [
-        "/api/status",
-        "/api/catalog",
-        "/api/plugins/cluster_gpu_usage",
-    ] {
-        let result: Value = client
-            .get(format!("{}{path}?limit=3&cursor=a%2Fb", server.url))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(result["path"], format!("/monitor{path}"));
-        assert_eq!(result["query"], "limit=3&cursor=a%2Fb");
-    }
-    let unavailable = client
-        .get(format!("{}/api/rules", server.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        unavailable.json::<Value>().await.unwrap()["error"],
-        "fixture"
-    );
-    let redirect = client
-        .get(format!("{}/api/collectors", server.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(redirect.status(), StatusCode::FOUND);
-    assert!(!redirect.headers().contains_key(header::LOCATION));
-    let info: Value = client
-        .get(format!("{}/api/hostmon", server.url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(info["url"], hostmon_url);
-    let legacy = client
-        .get(format!("{}/hostmon", server.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(legacy.headers()[header::LOCATION], hostmon_url);
-    let settings = client
-        .get(format!("{}/hostmon?page=settings", server.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        settings.headers()[header::LOCATION],
-        format!("{hostmon_url}?page=settings")
-    );
-    let layouts = client
-        .get(format!("{}/hostmon?page=layouts", server.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        layouts.headers()[header::LOCATION],
-        format!("{hostmon_url}?page=layouts")
-    );
-    let arbitrary = client
-        .get(format!(
-            "{}/hostmon?page=other&url=http://evil.example",
-            server.url
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(arbitrary.headers()[header::LOCATION], hostmon_url);
-    let count = requests.lock().unwrap().len();
-    for path in [
-        "/api/status/extra",
-        "/api/control",
-        "/api/proxy?url=http://example.com",
-    ] {
-        assert_eq!(
-            client
-                .get(format!("{}{path}", server.url))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-    }
-    assert_eq!(
-        client
-            .post(format!("{}/api/status", server.url))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::METHOD_NOT_ALLOWED
-    );
-    assert_eq!(requests.lock().unwrap().len(), count);
-    upstream.close().await;
-    let unavailable = client
-        .get(format!("{}/api/status", server.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
-    assert!(unavailable.json::<Value>().await.unwrap()["error"].is_string());
-    server.close().await;
-}
-
-#[tokio::test]
 async fn browser_mutations_require_same_origin_but_cli_needs_no_origin() {
     let fixture = Fixture::new();
-    let server = Server::start(fixture.router("http://127.0.0.1:1")).await;
+    let server = Server::start(fixture.router()).await;
     let client = client();
     let url = format!("{}/api/experiments/projects", server.url);
     for (name, value) in [
@@ -615,22 +625,4 @@ async fn browser_mutations_require_same_origin_but_cli_needs_no_origin() {
     assert_eq!(accepted.status(), StatusCode::CREATED);
     create(&client, &server, "projects", json!({"name": "cli"})).await;
     server.close().await;
-}
-
-#[test]
-fn invalid_hostmon_configuration_fails_before_serving() {
-    let fixture = Fixture::new();
-    for url in [
-        "file:///unused",
-        "http://user:password@127.0.0.1",
-        "http://127.0.0.1?url=other",
-        "http://127.0.0.1#fragment",
-    ] {
-        assert!(rvx_server::application(
-            fixture.engine.clone(),
-            fixture.directory.path().to_path_buf(),
-            url
-        )
-        .is_err());
-    }
 }

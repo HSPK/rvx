@@ -64,6 +64,7 @@ export interface SnapshotQuerySeries {
   run_id: string;
   source_id: string;
   path: string;
+  snapshot_ids: number[];
   source_session_ids: string[];
   sequences: number[];
   axes: number[];
@@ -86,5 +87,38 @@ export interface SnapshotChange {
 }
 export interface SnapshotDiffResponse extends SnapshotDiffRequest {
   changes: SnapshotChange[];
+  truncated: boolean;
+}
+
+export interface ChartRunInfo {
+  run_id: string;
+  snapshot_count: number;
+  first_observed_at_ns: number | null;
+  last_observed_at_ns: number | null;
+}
+export interface ChartMetricSource {
+  run_id: string;
+  source_id: string;
+  label: string;
+  role: string;
+  rank: number | null;
+  node_id: string | null;
+  primary: boolean;
+  latest_value: number | null;
+  observed_at_ns: number;
+}
+export interface ChartMetric {
+  path: string;
+  name: string;
+  group: string;
+  unit: string | null;
+  run_ids: string[];
+  sources: ChartMetricSource[];
+}
+export interface ChartCatalog {
+  runs: ChartRunInfo[];
+  metrics: ChartMetric[];
+  defaults: string[];
+  axes: string[];
   truncated: boolean;
 }

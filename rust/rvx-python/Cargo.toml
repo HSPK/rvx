@@ -10,7 +10,6 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-arrow.workspace = true
 rvx-core = { path = "../rvx-core" }
 rvx-engine = { path = "../rvx-engine" }
 rvx-snapshots = { path = "../rvx-snapshots" }

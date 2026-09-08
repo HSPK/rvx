@@ -17,8 +17,6 @@ def serve(
     data_dir: str,
     listen: str | None = None,
     ui_dir: str | None = None,
-    hostmon_url: str | None = None,
-    hot_capacity: str | None = None,
     scrape_concurrency: str | None = None,
 ) -> NoReturn:
     """Replace the CLI with the packaged daemon, retaining its PID and signal ownership."""
@@ -33,14 +31,17 @@ def serve(
         raise RuntimeError(f"Packaged Web UI is missing: {ui / 'index.html'}. {REBUILD_HELP}")
     if ui_dir is None and not any(path.is_file() for path in (ui / "assets").rglob("*")):
         raise RuntimeError(f"Packaged Web UI assets are missing: {ui / 'assets'}. {REBUILD_HELP}")
+    if ui_dir is None and (
+        not (ui / "login" / "index.html").is_file()
+        or not any(path.is_file() for path in (ui / "login" / "assets").rglob("*"))
+    ):
+        raise RuntimeError(f"Packaged sign-in UI is missing: {ui / 'login'}. {REBUILD_HELP}")
     arguments = [
         str(binary), "--data-dir", str(Path(data_dir).expanduser().resolve()),
         "--ui-dir", str(ui),
     ]
     for flag, value in (
         ("--listen", listen),
-        ("--hostmon-url", hostmon_url),
-        ("--hot-capacity", hot_capacity),
         ("--scrape-concurrency", scrape_concurrency),
     ):
         if value is not None:

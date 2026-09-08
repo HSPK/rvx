@@ -4,8 +4,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use rvx_core::SourceRegistration;
 use rvx_engine::Engine;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 struct Process(Child);
 
@@ -44,7 +46,7 @@ async fn signals_stop_and_restart_daemon_with_stalled_snapshot_pull() {
         drop(sockets);
     });
 
-    let engine = Engine::open(&data, 10).unwrap();
+    let engine = Engine::open(&data).unwrap();
     let project = engine.create_project("shutdown").unwrap();
     let experiment = engine.create_experiment(&project.id, "signals").unwrap();
     let run = engine.create_run(&experiment.id, "stalled", "{}").unwrap();
@@ -67,12 +69,16 @@ async fn signals_stop_and_restart_daemon_with_stalled_snapshot_pull() {
         .timeout(Duration::from_secs(1))
         .build()
         .unwrap();
+    const TOKEN: &str = "shutdown-auth-fixture-0123456789abcdef0123456789";
+    let mut cookie = String::new();
     for signal in ["-TERM", "-INT"] {
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
         let mut process = Process(
             Command::new(env!("CARGO_BIN_EXE_rvxd"))
+                .env("RVX_API_TOKEN", TOKEN)
+                .env_remove("RVX_PUBLIC_ORIGIN")
                 .arg("--data-dir")
                 .arg(&data)
                 .arg("--ui-dir")
@@ -86,7 +92,12 @@ async fn signals_stop_and_restart_daemon_with_stalled_snapshot_pull() {
         );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Ok(response) = client.get(format!("http://{address}/healthz")).send().await {
+                if let Ok(response) = client
+                    .get(format!("http://{address}/healthz"))
+                    .bearer_auth(TOKEN)
+                    .send()
+                    .await
+                {
                     assert_eq!(response.text().await.unwrap(), "ok\n");
                     break;
                 }
@@ -102,6 +113,59 @@ async fn signals_stop_and_restart_daemon_with_stalled_snapshot_pull() {
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
             .unwrap();
+        if !cookie.is_empty() {
+            let restored: serde_json::Value = client
+                .get(format!("http://{address}/api/auth/session"))
+                .header("cookie", &cookie)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(
+                restored["authenticated"], true,
+                "session must survive a real daemon restart"
+            );
+        }
+        let login = client
+            .post(format!("http://{address}/api/auth/login"))
+            .header("origin", format!("http://{address}"))
+            .header("cookie", &cookie)
+            .json(&serde_json::json!({"password":TOKEN}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), reqwest::StatusCode::OK);
+        cookie = login.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let mut request = format!("ws://{address}/api/ui/connection")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse().unwrap());
+        request
+            .headers_mut()
+            .insert("cookie", cookie.parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"type":"ping","id":"before-signal"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let pong = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(pong.to_text().unwrap().contains("before-signal"));
         assert!(Command::new("kill")
             .arg(signal)
             .arg(process.0.id().to_string())
@@ -119,6 +183,15 @@ async fn signals_stop_and_restart_daemon_with_stalled_snapshot_pull() {
         .await
         .expect("daemon must stop without waiting for the 60-second producer timeout");
         assert!(status.success(), "daemon exited unsuccessfully: {status}");
+        let close = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        match close {
+            Message::Close(Some(frame)) => assert_eq!(u16::from(frame.code), 1001),
+            other => panic!("expected shutdown close, got {other:?}"),
+        }
         assert!(!data.join("metrics.wal").exists());
     }
     let _ = stop_producer.send(());

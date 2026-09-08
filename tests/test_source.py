@@ -434,7 +434,7 @@ class SnapshotConsumerTests(unittest.TestCase):
         self.fail(f"expected {expected} durable snapshots; got {service.stats()}")
 
     def service(self, directory):
-        return RvxService(RvxSettings(directory=Path(directory), hot_capacity=100, scrape_concurrency=2))
+        return RvxService(RvxSettings(directory=Path(directory), scrape_concurrency=2))
 
     def register(self, service, run, role, producer):
         return service.register_source({
@@ -461,7 +461,10 @@ class SnapshotConsumerTests(unittest.TestCase):
                     service.start()
                     self.wait_for_snapshots(service, 4)
                     self.assertEqual(service.stats()["scrape_failures"], 0)
-                    self.assertEqual(service.stats()["ingested_points"], 0)
+                    self.assertEqual(set(service.stats()), {
+                        "projects", "experiments", "runs", "sources", "active_sources",
+                        "snapshots", "cursor_gaps", "scrape_failures",
+                    })
                     latest = service.snapshot_latest({"run_id": run, "limit": 1})
                     self.assertEqual(len(latest["snapshots"]), 1)
                     self.assertIsNotNone(latest["next_source_id"])
@@ -493,9 +496,18 @@ class SnapshotConsumerTests(unittest.TestCase):
                     self.assertEqual(result["series"][0]["source_session_ids"], [learner.source_session_id] * 3)
                     logical = service.snapshot_query({**query, "axis": "step"})
                     self.assertEqual(logical["series"][0]["axes"], [1, 2])
-                    nonnumeric = service.snapshot_query({**query, "paths": ["/added", "/workers"]})
-                    self.assertTrue(all(series["values"] == [None, None, None]
-                                        for series in nonnumeric["series"]))
+                    with self.assertRaisesRegex(RuntimeError, "not an indexed numeric field"):
+                        service.snapshot_query({**query, "paths": ["/added", "/workers"]})
+                    catalog = service.chart_catalog({"run_ids": [run]})
+                    loss = next(metric for metric in catalog["metrics"] if metric["path"] == "/progress/loss")
+                    self.assertIsNone(loss["sources"][0]["latest_value"])
+                    self.assertEqual(loss["group"], "Training")
+                    self.assertTrue(loss["sources"][0]["primary"])
+                    self.assertEqual(service.snapshot_get(first["id"]), first)
+                    elapsed = service.snapshot_query({**query, "axis": "elapsed"})
+                    self.assertEqual(elapsed["series"][0]["axes"], [0, 10, 20])
+                    for snapshot_id, value in zip(result["series"][0]["snapshot_ids"], result["series"][0]["values"]):
+                        self.assertEqual(service.snapshot_get(snapshot_id)["state"]["progress"].get("loss"), value)
                     escaped = service.snapshot_query({"run_ids": [run], "paths": ["/metrics/cpu~1percent"]})
                     actor_series = next(series for series in escaped["series"] if series["source_id"] != learner_source)
                     self.assertEqual(actor_series["values"], [12])
@@ -506,7 +518,7 @@ class SnapshotConsumerTests(unittest.TestCase):
                 self.assertEqual(service.snapshot_query(query), result)
                 self.assertEqual(service.stats()["snapshots"], 4)
                 self.assertEqual(service.snapshot_diff({"before_id": first["id"], "after_id": second["id"]}), changes)
-                self.assertEqual(service.legacy_query({"run_id": run, "metrics": ["loss"]})["series"], [])
+                self.assertEqual(service.chart_catalog({"run_ids": [run]}), catalog)
             finally:
                 service.close()
 

@@ -1,189 +1,96 @@
-import type {
-  AlertRuleConfig,
-  CollectorDiagnostic,
-  ExperimentQueryResponse,
-  ExperimentSummaryResponse,
-  ExperimentRecord,
-  ExperimentRun,
-  ExperimentSource,
-  ExperimentStats,
-  MetricCatalogResponse,
-  PluginDocument,
-  ProjectRecord,
-  StatusResponse,
-} from "../domain/types";
-import type {
-  SnapshotLatestRequest, SnapshotLatestResponse,
-  SnapshotHistoryRequest, SnapshotHistoryPage,
-  SnapshotQueryRequest, SnapshotQueryResponse,
-  SnapshotDiffRequest, SnapshotDiffResponse,
-} from "../domain/snapshots";
-import {parseExactJson} from "./exact-json";
+import type {ExperimentRecord, ExperimentRun, ExperimentSource, ExperimentStats, ProjectRecord} from "../domain/types";
+import type {ChartCatalog, SnapshotQueryRequest, SnapshotQueryResponse} from "../domain/snapshots";
+import {recordReadWeight} from "./read-weight";
+import {parseExactJson, parseExactProjection, stringifyExact} from "./exact-json";
+import type {SummaryRequest, SummaryResponse, TableCatalogRequest, TableCatalogResponse, TableRowsRequest, TableRowsResponse} from "../domain/tables";
+import {assertAuthenticated, requireAuthentication} from "../auth/session";
+import type {SnapshotAggregateRequest, SnapshotAggregateResponse, SnapshotRecordsRequest, SnapshotRecordsResponse} from "../domain/snapshot-views";
+
+/** Keep failed HTTP status and readable server details without exposing transport wrappers. */
+export function httpErrorMessage(status: number, body: string, contentType: string | null): string {
+  if (status === 401) return "Sign in to continue.";
+  let detail = body.trim();
+  const mediaType = contentType?.split(";")[0]?.trim().toLowerCase();
+  if (detail && (mediaType === "application/json" || mediaType?.endsWith("+json"))) {
+    if (detail.length > 16 * 1024) detail = "The server returned oversized error details.";
+    else {
+      try {
+        const value: unknown = JSON.parse(detail);
+        detail = typeof value === "string" ? value
+          : value !== null && typeof value === "object" && "error" in value && typeof value.error === "string"
+            ? value.error : "The server returned no readable error details.";
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        detail = "The server returned malformed error details.";
+      }
+    }
+  } else if (detail.startsWith("<")) detail = "";
+  detail = detail.trim();
+  if (detail.length > 400) detail = `${detail.slice(0, 400)}…`;
+  return `Request failed (${status})${detail ? `: ${detail}` : "."}`;
+}
 
 export class ApiClient {
-  updateRunStatus(runId: string, status: ExperimentRun["status"]): Promise<ExperimentRun> {
-    return this.postJson(`/api/experiments/runs/${encodeURIComponent(runId)}`, {status}, undefined, "PATCH");
+  async projects(signal?: AbortSignal): Promise<ProjectRecord[]> {
+    return (await this.request<{projects: ProjectRecord[]}>("/api/experiments/projects", undefined, signal)).projects;
   }
-
-  updateSourceState(sourceId: string, state: ExperimentSource["state"]): Promise<ExperimentSource> {
-    return this.postJson(`/api/experiments/sources/${encodeURIComponent(sourceId)}`, {state}, undefined, "PATCH");
+  async experiments(signal?: AbortSignal): Promise<ExperimentRecord[]> {
+    return (await this.request<{experiments: ExperimentRecord[]}>("/api/experiments/experiments", undefined, signal)).experiments;
   }
-
-  snapshotLatest(request: SnapshotLatestRequest, signal?: AbortSignal): Promise<SnapshotLatestResponse> {
-    return this.postJson("/api/snapshots/latest", request, signal);
+  async runs(signal?: AbortSignal): Promise<ExperimentRun[]> {
+    return (await this.request<{runs: ExperimentRun[]}>("/api/experiments/runs", undefined, signal)).runs;
   }
-
-  snapshotHistory(request: SnapshotHistoryRequest, signal?: AbortSignal): Promise<SnapshotHistoryPage> {
-    return this.postJson("/api/snapshots/history", request, signal);
+  async sources(runId: string, signal?: AbortSignal): Promise<ExperimentSource[]> {
+    return (await this.request<{sources: ExperimentSource[]}>(`/api/experiments/sources?${new URLSearchParams({run_id: runId})}`, undefined, signal)).sources;
   }
-
-  snapshotQuery(request: SnapshotQueryRequest, signal?: AbortSignal): Promise<SnapshotQueryResponse> {
-    return this.postJson("/api/snapshots/query", request, signal);
+  stats(signal?: AbortSignal): Promise<ExperimentStats> {
+    return this.request("/api/experiments/stats", undefined, signal);
   }
-
-  snapshotDiff(request: SnapshotDiffRequest, signal?: AbortSignal): Promise<SnapshotDiffResponse> {
-    return this.postJson("/api/snapshots/diff", request, signal);
+  catalog(runIds: string[], signal?: AbortSignal): Promise<ChartCatalog> {
+    return this.request("/api/charts/catalog", {run_ids: runIds}, signal);
   }
-
-  async status(signal?: AbortSignal): Promise<StatusResponse> {
-    return this.getJson<StatusResponse>("/api/status", signal);
+  query(body: SnapshotQueryRequest, signal?: AbortSignal): Promise<SnapshotQueryResponse> {
+    return this.request("/api/snapshots/query", body, signal, true);
   }
-
-  async catalog(
-    seconds: number,
-    signal?: AbortSignal,
-  ): Promise<MetricCatalogResponse> {
-    const query = new URLSearchParams({seconds: String(seconds)});
-    return this.getJson<MetricCatalogResponse>(`/api/catalog?${query}`, signal);
+  /** Read true per-reporter statistics over all indexed observations, never visual samples. */
+  tableSummary(body: SummaryRequest, signal?: AbortSignal): Promise<SummaryResponse> {
+    return this.request("/api/tables/summary", body, signal, true);
   }
-
-  async plugin<T>(
-    name: string,
-    signal?: AbortSignal,
-  ): Promise<PluginDocument<T>> {
-    return this.getJson<PluginDocument<T>>(
-      `/api/plugins/${encodeURIComponent(name)}`,
-      signal,
-    );
+  /** Discover generic snapshot collections without downloading raw states. */
+  tableCatalog(body: TableCatalogRequest, signal?: AbortSignal): Promise<TableCatalogResponse> {
+    return this.request("/api/tables/catalog", body, signal);
   }
-
-  async rules(): Promise<AlertRuleConfig[]> {
-    const response = await this.getJson<{rules: AlertRuleConfig[]}>("/api/rules");
-    return response.rules;
+  /** Delegate exact-cell filtering, numeric sorting and pinned pagination to the server. */
+  tableRows(body: TableRowsRequest, signal?: AbortSignal): Promise<TableRowsResponse> {
+    return this.request("/api/tables/rows", body, signal);
   }
-
-  async collectors(): Promise<CollectorDiagnostic[]> {
-    const response = await this.getJson<{collectors: CollectorDiagnostic[]}>(
-      "/api/collectors",
-    );
-    return response.collectors;
+  /** Read bounded current records with stable identities rather than loading raw snapshots into the UI. */
+  snapshotRecords(body: SnapshotRecordsRequest, signal?: AbortSignal): Promise<SnapshotRecordsResponse> {
+    return this.request("/api/snapshots/records", body, signal);
   }
-
-  async experimentStats(): Promise<ExperimentStats> {
-    return this.getJson<ExperimentStats>("/api/experiments/stats");
+  /** Aggregate the full filtered collection while retaining separate Run/Source series. */
+  snapshotAggregate(body: SnapshotAggregateRequest, signal?: AbortSignal): Promise<SnapshotAggregateResponse> {
+    return this.request("/api/snapshots/aggregate", body, signal);
   }
-
-  async projects(): Promise<ProjectRecord[]> {
-    const response = await this.getJson<{projects: ProjectRecord[]}>(
-      "/api/experiments/projects",
-    );
-    return response.projects;
-  }
-
-  async experiments(projectId?: string): Promise<ExperimentRecord[]> {
-    const query = projectId
-      ? `?${new URLSearchParams({project_id: projectId})}`
-      : "";
-    const response = await this.getJson<{experiments: ExperimentRecord[]}>(
-      `/api/experiments/experiments${query}`,
-    );
-    return response.experiments;
-  }
-
-  async experimentRuns(experimentId?: string): Promise<ExperimentRun[]> {
-    const query = experimentId
-      ? `?${new URLSearchParams({experiment_id: experimentId})}`
-      : "";
-    const response = await this.getJson<{runs: ExperimentRun[]}>(
-      `/api/experiments/runs${query}`,
-    );
-    return response.runs;
-  }
-
-  async experimentSources(runId?: string): Promise<ExperimentSource[]> {
-    const query = runId
-      ? `?${new URLSearchParams({run_id: runId})}`
-      : "";
-    const response = await this.getJson<{sources: ExperimentSource[]}>(
-      `/api/experiments/sources${query}`,
-    );
-    return response.sources;
-  }
-
-  async queryExperimentMetrics(request: {
-    run_id: string;
-    source_ids?: string[];
-    metrics: string[];
-    axis: string;
-    from?: number;
-    to?: number;
-    max_points?: number;
-  }, signal?: AbortSignal): Promise<ExperimentQueryResponse> {
-    return this.postJson<ExperimentQueryResponse>(
-      "/api/experiments/query",
-      request,
-      signal,
-    );
-  }
-
-  async queryExperimentSummaries(request: {
-    run_ids: string[];
-    metrics: string[];
-    axis: string;
-    from?: number;
-    to?: number;
-  }): Promise<ExperimentSummaryResponse> {
-    return this.postJson<ExperimentSummaryResponse>(
-      "/api/experiments/query-summaries",
-      request,
-    );
-  }
-
-  private async getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  private async request<T>(url: string, body?: unknown, signal?: AbortSignal, exact = false): Promise<T> {
+    assertAuthenticated();
     const response = await fetch(url, {
+      method: body === undefined ? "GET" : "POST",
       cache: "no-store",
-      headers: {Accept: "application/json"},
+      credentials: "same-origin",
+      headers: {Accept: "application/json", ...(body === undefined ? {} : {"Content-Type": "application/json"})},
+      ...(body === undefined ? {} : {body: stringifyExact(body)}),
       ...(signal ? {signal} : {}),
     });
     if (!response.ok) {
-      throw new Error(`${url} returned HTTP ${response.status}`);
+      if (response.status === 401) throw requireAuthentication();
+      throw new Error(httpErrorMessage(response.status, await response.text(), response.headers.get("content-type")));
     }
-    return (await response.json()) as T;
-  }
-
-  private async postJson<T>(
-    url: string,
-    body: unknown,
-    signal?: AbortSignal,
-    method = "POST",
-  ): Promise<T> {
-    const response = await fetch(url, {
-      method,
-      cache: "no-store",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      ...(signal ? {signal} : {}),
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(message || `${url} returned HTTP ${response.status}`);
-    }
-    if (url === "/api/snapshots/latest" || url === "/api/snapshots/history" || url === "/api/snapshots/diff") {
-      return parseExactJson<object>(await response.text()) as T;
-    }
-    return (await response.json()) as T;
+    const text = await response.text();
+    const value: unknown = url === "/api/snapshots/query"
+      ? await parseExactProjection(text, signal)
+      : exact ? parseExactJson<object>(text) : JSON.parse(text);
+    recordReadWeight(value, text.length);
+    return value as T;
   }
 }

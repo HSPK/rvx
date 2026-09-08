@@ -18,7 +18,7 @@ def check_wheel(path: Path, version: str, platform: str | None) -> None:
         names = set(archive.namelist())
         required = {
             "rvx/__init__.py", "rvx/source.py", "rvx/adapters.py", "rvx/cli.py",
-            "rvx/_bin/rvxd", "rvx/_web/index.html",
+            "rvx/_bin/rvxd", "rvx/_web/index.html", "rvx/_web/login/index.html",
             f"rvx-{version}.dist-info/METADATA", f"rvx-{version}.dist-info/WHEEL",
         }
         if missing := required - names:
@@ -50,6 +50,10 @@ def check_wheel(path: Path, version: str, platform: str | None) -> None:
         assets = re.findall(r'(?:src|href)="(/assets/[^"]+)"', html)
         if not assets or any("rvx/_web" + asset not in names for asset in assets):
             raise ValueError("bundled UI references missing assets")
+        login = archive.read("rvx/_web/login/index.html").decode("utf-8")
+        login_assets = re.findall(r'(?:src|href)="(/login/assets/[^"]+)"', login)
+        if not login_assets or any("rvx/_web" + asset not in names for asset in login_assets):
+            raise ValueError("bundled login UI references missing assets")
         if platform and platform.startswith("manylinux_2_28_"):
             check_glibc(archive.read("rvx/_bin/rvxd"))
     print(f"Complete RVX wheel: {path.name}")

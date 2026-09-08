@@ -32,10 +32,10 @@ def smoke() -> None:
         raise RuntimeError("smoke must import an installed wheel, not the source checkout")
     scripts = Path(sys.executable).parent
     os.environ["PATH"] = str(scripts)
-    with tempfile.TemporaryDirectory(prefix="rvx-installed-") as directory:
+    with tempfile.TemporaryDirectory(prefix="rvx-installed-", dir=Path.cwd()) as directory:
         process = subprocess.Popen(
             [str(scripts / "rvx"), "serve", "--data-dir", str(Path(directory) / "data"),
-             "--listen", "127.0.0.1:0", "--hostmon-url", "http://127.0.0.1:1"],
+             "--listen", "127.0.0.1:0"],
             cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
@@ -86,6 +86,17 @@ def smoke() -> None:
                 })
                 if trend["axis"] != "wall_time" or trend["series"][0]["values"] != [0.8, None]:
                     raise RuntimeError("installed projection lost snapshot semantics")
+                catalog = request(base, "/api/charts/catalog", {"run_ids": [run["id"]]})
+                if catalog["defaults"] != ["/progress/loss"]:
+                    raise RuntimeError("installed catalog selected nonsemantic defaults")
+                snapshot_id = trend["series"][0]["snapshot_ids"][-1]
+                if request(base, f"/api/snapshots/{snapshot_id}") != latest:
+                    raise RuntimeError("chart provenance does not identify its raw snapshot")
+                if set(request(base, "/api/experiments/stats")) != {
+                    "projects", "experiments", "runs", "sources", "active_sources",
+                    "snapshots", "cursor_gaps", "scrape_failures",
+                }:
+                    raise RuntimeError("installed server exposes obsolete counters")
                 process.send_signal(signal.SIGTERM)
                 stdout, stderr = process.communicate(timeout=10)
                 if process.returncode != 0:

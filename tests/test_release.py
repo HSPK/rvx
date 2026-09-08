@@ -36,6 +36,8 @@ class ReleaseContractTests(unittest.TestCase):
             "rvx/_bin/rvxd": "test-executable-placeholder",
             "rvx/_web/index.html": '<script src="/assets/app.js"></script>',
             "rvx/_web/assets/app.js": "test-ui",
+            "rvx/_web/login/index.html": '<script src="/login/assets/login.js"></script>',
+            "rvx/_web/login/assets/login.js": "test-login-ui",
             "rvx-0.1.0.dist-info/METADATA": (
                 "Metadata-Version: 2.4\nName: rvx\nVersion: 0.1.0\n"
                 + (f"Requires-Dist: {dependency}\n" if dependency else "")
@@ -61,6 +63,7 @@ class ReleaseContractTests(unittest.TestCase):
             for omitted in (
                 ("rvx/_bin/rvxd",), ("rvx/_web/index.html",),
                 ("rvx/_web/assets/app.js",), ("rvx/_native.abi3.so",),
+                ("rvx/_web/login/index.html",), ("rvx/_web/login/assets/login.js",),
             ):
                 with self.subTest(omitted=omitted):
                     path = self.fixture_wheel(directory, omitted=omitted)

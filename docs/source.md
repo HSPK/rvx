@@ -1,7 +1,7 @@
 # Source SDK
 
 RVX retains full structured runtime state. Numeric trends are projections of
-that state **on read**, not a separate metric logging stream. See
+that state, not a separate metric logging stream. See
 [the authoritative snapshot contract](snapshots.md) for exact wire shapes.
 
 `Source` is a data producer, not the central storage/query server (`rvxd`).
@@ -193,14 +193,8 @@ must not prevent the Source from recording or serving another mounted reader.
 Create one producer inside each worker process. Inherited producers reject
 operations after `fork`; a fresh instance has a fresh session and starts its
 sequence at zero. Public exports are `Source`, `SnapshotEvent`,
-`CaptureReceipt`, and `SourceStats`. There is no `SnapshotServer` or `MetricServer` alias,
-`MetricDefinition`, `MetricEvent`, `log`, `log_batch`, or Push ingestion API.
-
-Migration from the preceding SDK: rename `SnapshotServer` to `Source` and
-`SnapshotServerStats` to `SourceStats`; move `host`/`port` out of construction
-into `serve()`, and replace `start()` with explicit `serve()`. A `with Source`
-block no longer starts HTTP implicitly. The wire protocol, consumer data,
-and existing registrations are unchanged. Hostmon keeps its independent
+`CaptureReceipt`, and `SourceStats`. There are no old-name aliases, independent
+metric logging methods, or Push ingestion APIs. Hostmon keeps its independent
 producer implementation and does not acquire a RVX dependency.
 
 ## Read retained state
@@ -211,10 +205,12 @@ consumer contract:
 ```python
 latest = service.snapshot_latest({"run_id": run_id, "limit": 100})
 history = service.snapshot_history({"run_id": run_id, "limit": 100})
+catalog = service.chart_catalog({"run_ids": [run_id]})
 trend = service.snapshot_query({
     "run_ids": [run_id], "paths": ["/progress/loss"], "axis": "wall_time",
 })
 diff = service.snapshot_diff({"before_id": before_id, "after_id": after_id})
+observation = service.snapshot_get(after_id)
 ```
 
 Native `RvxEngine.snapshot_latest/history/query/diff` accept a JSON request
@@ -233,9 +229,15 @@ rvx query --run RUN_ID --field /progress/loss
 rvx query --run RUN_ID --field /progress/loss --axis optimizer_step
 ```
 
-Old numeric data remains read-only through `legacy-query --metric NAME` and
-`RvxService.legacy_query`, `legacy_query_summaries`, and `legacy_query_arrow`.
-It cannot reconstruct structured state that was never captured.
+The chart catalog discovers recorded numeric object fields without returning
+raw states. Query series retain `snapshot_ids` aligned with values and axes,
+so an inspected curve point opens the real stored observation. Use `elapsed`
+for nanoseconds since each Run's first observation; its origin is independent
+of Run creation and ingestion. Array contents are retained in raw state but
+not automatically indexed for charts.
+
+There is no scalar-history reader or compatibility query API. Previously
+archived scalar data cannot reconstruct state that was never captured.
 
 The CPU-local process integration test publishes concurrent actor, learner,
 inference, and evaluator observations for two Runs into one standalone daemon.

@@ -32,7 +32,7 @@ class RvxBindingTests(unittest.TestCase):
         except ImportError:
             self.skipTest("rvx._native extension is not installed")
         with engine_directory() as directory:
-            engine = RvxEngine(directory, 100, 4, False)
+            engine = RvxEngine(directory, 4, False)
             try:
                 project = json.loads(engine.create_project("project"))
                 experiment = json.loads(
@@ -132,7 +132,7 @@ class RvxBindingTests(unittest.TestCase):
                         server.shutdown()
                         thread.join(timeout=5)
                         self.assertFalse(thread.is_alive())
-                engine = RvxEngine(directory, 100, 4, False)
+                engine = RvxEngine(directory, 4, False)
                 query = {
                     "run_ids": [run["id"]],
                     "paths": ["/progress/loss"],
@@ -149,7 +149,7 @@ class RvxBindingTests(unittest.TestCase):
                     engine.update_run_status(run["id"], "finished")
                 )
                 engine.close()
-                engine = RvxEngine(directory, 100, 4, False)
+                engine = RvxEngine(directory, 4, False)
                 recovered = json.loads(engine.snapshot_query(json.dumps(query)))
             finally:
                 engine.close()
@@ -163,21 +163,21 @@ class RvxBindingTests(unittest.TestCase):
         self.assertEqual(len(history["snapshots"]), 2)
         self.assertEqual(recovered["series"][0]["values"], [1.0, 0.5])
 
-    def test_legacy_numeric_queries_are_explicit_and_read_only(self):
-        """Keep old query formats readable without inventing snapshot history."""
+    def test_empty_catalog_and_removed_scalar_interfaces(self):
+        """Never invent chart data or retain a second scalar logging channel."""
         from rvx._native import RvxEngine
         with engine_directory() as directory:
-            engine = RvxEngine(directory, 100, 2, False)
+            engine = RvxEngine(directory, 2, False)
             try:
                 project = json.loads(engine.create_project("project"))
                 experiment = json.loads(engine.create_experiment(project["id"], "experiment"))
-                run = json.loads(engine.create_run(experiment["id"], "legacy", "{}"))
-                query = json.dumps({"run_id": run["id"], "metrics": ["loss"]})
-                self.assertEqual(json.loads(engine.legacy_query_json(query))["series"], [])
-                arrow = bytes(engine.legacy_query_arrow(query))
-                self.assertGreater(len(arrow), 100)
-                self.assertEqual(arrow[:4], b"\xff\xff\xff\xff")
-                engine.legacy_query_summaries_json(json.dumps({"run_ids": [run["id"]], "metrics": ["loss"]}))
+                run = json.loads(engine.create_run(experiment["id"], "empty", "{}"))
+                catalog = json.loads(engine.chart_catalog(json.dumps({"run_ids": [run["id"]]})))
+                self.assertEqual(catalog["metrics"], [])
+                self.assertEqual(catalog["runs"][0]["snapshot_count"], 0)
+                self.assertIsNone(catalog["runs"][0]["first_observed_at_ns"])
+                for method in ("legacy_query_json", "legacy_query_summaries_json", "legacy_query_arrow"):
+                    self.assertFalse(hasattr(engine, method))
                 self.assertFalse(hasattr(engine, "compact"))
                 self.assertEqual(json.loads(engine.stats_json())["snapshots"], 0)
             finally:
@@ -201,7 +201,7 @@ class RvxBindingTests(unittest.TestCase):
         except ImportError:
             self.skipTest("rvx._native extension is not installed")
         with engine_directory() as directory:
-            engine = RvxEngine(directory, 100, 4, False)
+            engine = RvxEngine(directory, 4, False)
             try:
                 project = json.loads(engine.create_project("project"))
                 experiment = json.loads(engine.create_experiment(project["id"], "experiment"))
@@ -218,7 +218,6 @@ class RvxBindingTests(unittest.TestCase):
         settings = RvxSettings(
             enabled=False,
             directory=Path("/unused"),
-            hot_capacity=1,
             scrape_concurrency=1,
         )
 
@@ -240,7 +239,6 @@ class RvxBindingTests(unittest.TestCase):
                 RvxSettings(
                     enabled=True,
                     directory=Path(directory),
-                    hot_capacity=100,
                     scrape_concurrency=2,
                 )
             )
@@ -268,7 +266,7 @@ class RvxBindingTests(unittest.TestCase):
         """Reject invalid ownership settings without touching a directory."""
         with self.assertRaises(TypeError):
             RvxSettings()
-        for field in ("hot_capacity", "scrape_concurrency"):
+        for field in ("scrape_concurrency",):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 RvxSettings(directory=Path("/unused"), **{field: 0})
         self.assertTrue(RvxSettings(directory=Path("/unused")).enabled)
@@ -304,7 +302,7 @@ class RvxCLITests(unittest.TestCase):
                 self.assertEqual(request.call_args.args[1], "/api/snapshots/query")
                 self.assertEqual(request.call_args.kwargs["payload"]["paths"], ["/progress/loss"])
 
-    def test_snapshot_and_explicit_legacy_cli_requests(self):
+    def test_snapshot_and_chart_catalog_cli_requests(self):
         for flags, path, expected in [
             (["snapshots", "latest", "--run", "r", "--limit", "2", "--after-source-id", "s"],
              "/api/snapshots/latest", {"run_id": "r", "limit": 2, "after_source_id": "s"}),
@@ -312,8 +310,8 @@ class RvxCLITests(unittest.TestCase):
              "/api/snapshots/history", {"run_id": "r", "before_id": 20, "from": 10}),
             (["snapshots", "diff", "--before-id", "2", "--after-id", "3"],
              "/api/snapshots/diff", {"before_id": 2, "after_id": 3}),
-            (["legacy-query", "--run", "r", "--metric", "loss"],
-             "/api/experiments/query", {"run_id": "r", "metrics": ["loss"]}),
+            (["catalog", "--run", "r"],
+             "/api/charts/catalog", {"run_ids": ["r"]}),
         ]:
             with self.subTest(flags=flags), patch("rvx.cli.api_request") as request:
                 execute(build_parser().parse_args(flags))
@@ -321,6 +319,20 @@ class RvxCLITests(unittest.TestCase):
                 self.assertEqual(request.call_args.kwargs["method"], "POST")
                 for key, value in expected.items():
                     self.assertEqual(request.call_args.kwargs["payload"][key], value)
+
+    def test_raw_snapshot_cli_and_removed_command_surface(self):
+        with patch("rvx.cli.api_request") as request:
+            execute(build_parser().parse_args(["snapshots", "get", "7"]))
+            self.assertEqual(request.call_args.args[1], "/api/snapshots/7")
+            self.assertNotIn("payload", request.call_args.kwargs)
+        for args in (
+            ["legacy-query", "--run", "r", "--metric", "loss"],
+            ["serve", "--data-dir", "unused", "--hot-capacity", "1"],
+            ["serve", "--data-dir", "unused", "--hostmon-url", "http://localhost:1"],
+        ):
+            with self.subTest(args=args), patch("sys.stderr", new=io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    build_parser().parse_args(args)
 
     def test_http_request_mapping_and_error_reporting(self):
         """Exercise real CLI HTTP requests against an isolated role-free fixture."""

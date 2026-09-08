@@ -1,13 +1,18 @@
 # RVX architecture and operation
 
-Status: snapshot-first preview. Earlier scalar-metric Beta results do not
-establish the performance or reliability of this architecture.
+Status: **Pre-alpha / very early development**, with no backward-compatibility
+guarantee. Earlier scalar-metric Beta results do not establish the performance
+or reliability of this architecture.
+
+This document describes the runtime behind the
+[UX-first, charts-first interface](ui_design.md). The browser starts with
+useful curves; complete snapshots remain the underlying evidence.
 
 ## Primary data and boundaries
 
 RVX retains complete published runtime-state snapshots for asynchronous ML/RL
 experiments: latest state, historical versions, replay, changes, and comparison.
-Numeric trends are read-time projections from those snapshots. There is no
+Numeric trends are derived from those snapshots. There is no
 independent metric/event `log` channel.
 
 ```text
@@ -47,9 +52,9 @@ role's application state
         |
   Rust Pull coordinator
         |
-  full-state SQLite WAL transaction + snapshot cursor
+  full-state SQLite WAL transaction + cursor + derived chart index
         |
-  latest / historical page / diff / numeric projection
+  chart catalog / numeric projection / exact observation / history / diff
         |
   Rust HTTP API -> TypeScript workspace / Python CLI
 ```
@@ -71,9 +76,11 @@ store. Metadata retains the existing Run/Source hierarchy and lifecycle.
 Snapshot persistence and cursor advancement are transactional; numeric
 projections do not create another primary data stream.
 
-The legacy numeric WAL/hot/Parquet read path is retained only to read existing
-data. Old metric descriptors and archive identities are not evidence that
-full structured state existed in that history.
+The numeric field/value/axis index is rebuildable from complete stored
+snapshots. It avoids parsing raw historical documents for ordinary chart
+requests and commits with the raw capture and cursor. It is not an independent
+metric store or ingestion channel. Scalar WAL/hot/Parquet readers and their
+compatibility APIs are removed; archived scalar files are not loaded.
 
 ## Code map
 
@@ -82,10 +89,10 @@ full structured state existed in that history.
 | `rust/rvx-core` | Identity, shared snapshot contracts, validation, lifecycle types |
 | `rust/rvx-snapshots` | Full-state producer buffer and HTTP Pull handlers |
 | `rust/rvx-engine` | Registry, scheduler, durable snapshot store and read operations |
-| `rust/rvx-server` | Control/read APIs, static UI, optional hostmon proxy, process lifetime |
+| `rust/rvx-server` | Authenticated control/read APIs, static UI, process lifetime |
 | `rust/rvx-python` | Coarse PyO3 bindings and native producer runtime |
 | `src/rvx` | Python SDK, control service, HTTP client CLI |
-| `web/src/rvx` | Browser/navigation, analysis workspace, state/projection views |
+| `web/src/app` | Multi-run charts/tables, Run details, server workspace preferences and connection state |
 
 Read [the shared contract](snapshots.md) first, then the engine/store, producer,
 and API/UI consumers. Python is not on the standalone server's scrape or HTTP
@@ -107,13 +114,15 @@ not metric definitions. History uses inclusive cursors, bounded pages, and
 explicit `dropped_before` information. Each whole snapshot must fit 4 MiB;
 producer pages fit 16 MiB and at most 256 versions.
 
-The consumer provides POST read operations:
+The consumer provides:
 
 ```text
-/api/snapshots/latest
-/api/snapshots/history
-/api/snapshots/diff
-/api/snapshots/query
+POST /api/charts/catalog
+POST /api/snapshots/query
+GET  /api/snapshots/{id}
+POST /api/snapshots/latest
+POST /api/snapshots/history
+POST /api/snapshots/diff
 ```
 
 Latest pages are ordered by Source ID. History pages are ordered by stored
@@ -121,17 +130,84 @@ snapshot ID, newest first. Storage IDs are not Source-local versions.
 History can be selected and replayed in chronological order.
 
 Field paths use RFC 6901 JSON pointers relative to state. For example:
-`/progress/loss`, `/workers/0/queue_depth`, `/metrics/cpu~1percent`.
+`/progress/loss`, `/metrics/cpu~1percent`.
 Queries may compare multiple Run IDs, and explicit logical axes exclude
-observations without that axis. Wall time is the default.
+observations without that axis. Wall time is the query default; elapsed time
+uses each Run's first observation, never its registration or ingestion time.
+Catalog discovery indexes numeric object fields, not array contents.
+Unindexed fields remain in raw state and must not masquerade as all-null
+chart results. Every sampled chart observation retains its actual storage ID.
 
 Diffs may compare versions from different Sources or Runs. Added/removed
 fields remain distinct from a value changing to JSON null. Large diffs report
 truncation rather than silently claiming to be complete.
 
-Metadata/control APIs remain under `/api/experiments/*`. The old numeric query
-API remains explicitly legacy and read-only; it is not the source for the new
-snapshot workspace.
+Metadata/control APIs remain under `/api/experiments/*`. There is one numeric
+query path, derived solely from snapshots; no legacy-query API remains.
+
+## Server-owned UI state and connection telemetry
+
+The UI uses these same-origin, authenticated endpoints:
+
+```text
+GET /api/ui/state
+PUT /api/ui/workspaces
+PUT /api/ui/browser
+GET /api/ui/connection   (WebSocket upgrade)
+```
+
+`GET /api/ui/state` returns shared `{revision, sets}` workspace definitions
+and a separate `{revision, theme, sidebar_width, selected, run_colors}` browser preference
+document. An opaque HttpOnly, SameSite=Strict cookie identifies browser
+preferences, not authentication. Theme, rail width, and Run colors can differ between
+browsers; workspace layouts are shared. Data lives with registry metadata in
+the current Engine-owned SQLite WAL database and survives process restarts.
+`run_colors` contains at most 1,000 registered Run IDs mapped to six-digit
+hex colors. Removing an override restores automatic palette assignment.
+Old stored browser documents acquire an empty map without losing their
+existing preferences; new browser writes include the full map.
+
+Writes carry the expected revision and a mutation ID. They publish success
+only after the transaction commits. A stale revision returns HTTP409 with the
+current document; the client retains its working draft for explicit conflict
+resolution. Shared-layout and per-browser revisions are independent. Retrying
+the latest identical mutation is idempotent, not a second save. Limits and
+layout validation prevent malformed, oversized, or orphaned panel definitions.
+Deleting a workspace removes stale selection references without deleting Run
+observations. A workspace's organizing experiment does not restrict explicit
+reporter filters from Runs compared across experiments.
+
+UI writes are limited to 2 MiB, with at most 100 shared workspaces and
+24 panels/24 sections per workspace. The browser preference registry is
+bounded at 10,000 identities and never silently evicts another browser's
+settings. A missing or unknown browser cookie must bootstrap through
+`GET /api/ui/state` before writing. The cookie is HttpOnly, SameSite=Strict,
+and Secure when the explicitly configured public origin uses HTTPS.
+
+The WebSocket validates both the existing authentication and the browser's
+Origin on the GET handshake. Its only application message is a bounded
+`{"type":"ping","id":"..."}` request and matching
+`{"type":"pong","id":"..."}` response. The browser measures round-trip time
+with its monotonic clock. This is connection telemetry, not snapshot Push
+ingestion or an alternate metric stream. Reconnects use bounded backoff, and
+server shutdown closes active sockets instead of waiting indefinitely.
+Each server permits at most 128 concurrent sockets. Application messages
+are limited to 1 KiB and ASCII ping identifiers to 64 bytes; sockets close
+after 30 seconds without traffic or when exceeding 10 messages per second.
+
+Visible charts and tables share continuous refresh. Table filters/sorting/page
+are retained as new snapshots arrive, with page clamping when results shrink;
+the UI does not retain an indefinite historical browse pin. Hidden pages
+suspend expensive reads and resume when visible.
+
+Workspace column preferences support optional `decimals` from 0 through 20;
+omission preserves automatic display. Formatting never changes raw values,
+sorting, filtering, or CSV export. Persisted filter definitions support optional
+`enabled` (omission means true). The browser retains disabled definitions but
+omits them, and the `enabled` property itself, from native table requests.
+Native row sorting caches exact keys, partitions matching records to the
+requested page, and sorts that page while retaining deterministic ties and
+snapshot provenance.
 
 ## Lifecycle and retention
 
@@ -179,9 +255,36 @@ Keep a persistent data directory and exactly one owner. SIGINT/SIGTERM shut
 down serving and cancel/await the coordinator. Do not inspect live storage by
 opening another `RvxService` or engine; use HTTP read APIs.
 
-The server accepts loopback listeners only and has no public authentication.
-Local CLI requests may omit Origin; browser mutations must be same-origin.
-Use secured tunneling for remote access.
+Without `RVX_API_TOKEN`, the server permits only loopback listeners and hosts.
+Non-loopback binding requires a 32-256-character printable shared token.
+When configured, workspace UI, data APIs, app assets, and health require authentication.
+Browsers sign in at `/login` with the existing shared access password; the CLI
+uses Bearer authentication through `RVX_API_TOKEN`. No password is accepted as a command
+argument. Keep environment files outside source control with owner-only access.
+
+Only `/login`, `/login/`, isolated `/login/assets/` resources, and
+`GET /api/auth/session` are public read surfaces. Login posts the password to
+`POST /api/auth/login`; `POST /api/auth/logout` revokes the current session.
+Both POSTs require the same-origin Origin header. The separate login build
+loads no private application assets before authentication.
+
+Browser sessions use opaque HttpOnly/SameSite=Strict cookies and expire after
+seven days. The server persists only a domain-separated keyed digest and expiry
+in its existing metadata database. Sessions survive process restarts; logout
+revokes them, and changing `RVX_API_TOKEN` invalidates earlier sessions.
+Cookies are Secure when the explicitly configured public origin uses HTTPS.
+The preference cookie is independent and is not removed at logout. Browser
+Basic challenges are no longer used. Cookie expiry/revocation also retires
+authenticated WebSockets; an active UI can renew authentication in place
+without discarding its current draft.
+
+Authenticated remote browser POST requests must still be same-origin;
+origin-free authenticated CLI requests remain supported. Responses cannot be
+framed, and authenticated content is marked private/no-store.
+HTTP itself is not encrypted: use a secure tunnel or HTTPS reverse proxy on
+untrusted networks. For HTTPS termination set `RVX_PUBLIC_ORIGIN` to the exact
+external origin; forwarded headers alone never override the policy.
+This is a shared administrative credential, not multi-user authorization.
 
 In a cluster, one shared persistent server can hold many Projects and
 Experiments. A per-training-job database cannot provide shared comparison by
@@ -208,12 +311,11 @@ mounting, and independent data/HTTP lifetimes. Mounted adapters dispatch through
 the Python host and offload Rust serialization from its event loop; optional
 native `serve()` avoids Python request dispatch entirely.
 
-## Hostmon migration and compatibility
+## Hostmon as an ordinary producer
 
 Hostmon remains a separate Python monitor. Its original collectors, alert
 rules/outbox, JSONL writer, Prometheus endpoint, and UI remain independent.
-Only its optional observation producer changes to `[rvx_snapshots]` and
-`/v1/snapshots/*`.
+Its optional `[rvx_snapshots]` observation producer exposes `/v1/snapshots/*`.
 
 Hostmon captures complete current measurements and fields, public collector
 health/documents with their freshness metadata, and public alert observations.
@@ -221,36 +323,21 @@ It does not export arbitrary internal plugin state, options, configuration,
 or private delivery state. Optional collectors can contribute cached results;
 their observation ages are preserved.
 
-Upgrade producer and consumer together, retain the original Source URL and Run
-identity, and keep the same RVX data directory. Fresh snapshot Sessions use
-their own cursor namespace. Do not import old scalar records as fake snapshots.
-Old numeric history stays readable; original hostmon JSONL files are neither
-deleted nor backfilled.
-
-The optional `--hostmon-url` proxy remains separate from storage. It allows
-GET only for status, catalog, collectors, rules, and the GPU usage report.
-It follows no redirects, forwards no browser credentials, and has no arbitrary
-target URL. Unreachable hostmon returns 502 without disabling stored reads.
-`/hostmon` redirects to the original dashboard; only settings/layouts navigation
-query values are allowlisted.
+Register its reachable base URL as a Source with role `hostmon`. There is no
+special hostmon proxy, server flag, or mirrored administration dashboard.
+Fresh snapshot Sessions use their own cursor namespace. Structured history
+begins with actual captures: old scalar records are not fake snapshots.
+Original hostmon JSONL files and retired RVX scalar archives are neither
+deleted nor backfilled; the snapshot-only runtime does not read those archives.
 
 ## Performance evidence and limits
 
-The snapshot architecture trades full-state fidelity for larger payloads and
-read-time projection work. Serialized size, nesting, nodes, page size, count
+The snapshot architecture preserves full-state fidelity at the cost of larger
+payloads and derived-index write work. Serialized size, nesting, nodes, page size, count
 retention, and byte retention are bounded. Those bounds are not a throughput
 or whole-process RSS guarantee.
 
-Former scalar-only measurements remain historical, not snapshot acceptance:
-
-| Previous workload | Historical result |
-| --- | --- |
-| Synthetic metric WAL ingestion | 142k-163k scalar points/s |
-| Scalar Parquet compaction | 569k-587k values/s |
-| Scalar-only 24-hour synthetic soak | 8,628,500 points; 181.12 MiB maximum RSS |
-| 10,000 registered endpoints | Mostly failing endpoints, not 10,000 healthy producers |
-
-These numbers cannot be compared directly with structured capture/Pull/query
-throughput, and there is no head-to-head W&B or Prometheus benchmark.
+Old scalar-only benchmarks do not describe this implementation and are not
+performance claims for RVX. There is no head-to-head W&B or Prometheus benchmark.
 Large-scale healthy-target, multi-node RL, and long-duration snapshot workloads
 still need their own controlled measurements.

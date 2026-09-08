@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.build");
     std::fs::create_dir_all(&root)?;
     let directory = tempfile::tempdir_in(root)?;
-    let engine = Engine::open(directory.path(), 10_000)?;
+    let engine = Engine::open(directory.path())?;
     let project = engine.create_project("benchmark")?;
     let experiment = engine.create_experiment(&project.id, "scheduler")?;
     let run = engine.create_run(&experiment.id, "targets", "{}")?;

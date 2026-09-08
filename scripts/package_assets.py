@@ -35,6 +35,10 @@ def stage_assets(binary: Path, ui: Path) -> tuple[Path, Path]:
         raise ValueError("--ui must contain a nonempty built index.html")
     if not any(path.is_file() and path.stat().st_size for path in (ui / "assets").rglob("*")):
         raise ValueError("--ui must contain nonempty built assets")
+    if not (ui / "login" / "index.html").is_file() or not (ui / "login" / "index.html").stat().st_size:
+        raise ValueError("--ui must contain a nonempty built login/index.html")
+    if not any(path.is_file() and path.stat().st_size for path in (ui / "login" / "assets").rglob("*")):
+        raise ValueError("--ui must contain nonempty built login assets")
 
     package = PACKAGE_ROOT.absolute()
     binary_dir, ui_target = package / "_bin", package / "_web"

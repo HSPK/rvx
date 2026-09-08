@@ -33,6 +33,9 @@ class AssetStagingTests(unittest.TestCase):
         (self.ui / "assets").mkdir(parents=True)
         (self.ui / "index.html").write_text('<script src="/assets/app.js"></script>')
         (self.ui / "assets" / "app.js").write_text("fixture")
+        (self.ui / "login" / "assets").mkdir(parents=True)
+        (self.ui / "login" / "index.html").write_text('<script src="/login/assets/login.js"></script>')
+        (self.ui / "login" / "assets" / "login.js").write_text("login fixture")
         self.destination = patch.object(package_assets, "PACKAGE_ROOT", self.package)
         self.destination.start()
         self.addCleanup(self.destination.stop)
@@ -45,6 +48,7 @@ class AssetStagingTests(unittest.TestCase):
         self.assertEqual(ui, self.package / "_web")
         self.assertEqual((ui / "index.html").read_bytes(), (self.ui / "index.html").read_bytes())
         self.assertEqual((ui / "assets" / "app.js").read_text(), "fixture")
+        self.assertEqual((ui / "login" / "assets" / "login.js").read_text(), "login fixture")
 
     def test_restage_prunes_only_obsolete_generated_ui_files(self):
         unrelated = self.package / "source.py"
@@ -78,6 +82,15 @@ class AssetStagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonempty built assets"):
             package_assets.stage_assets(self.binary, self.ui)
         self.assertFalse((self.package / "_bin").exists())
+
+    def test_login_entry_and_assets_are_required_before_staging(self):
+        for missing in (self.ui / "login" / "index.html", self.ui / "login" / "assets" / "login.js"):
+            content = missing.read_bytes()
+            missing.unlink()
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "login"):
+                package_assets.stage_assets(self.binary, self.ui)
+            self.assertFalse((self.package / "_bin").exists())
+            missing.write_bytes(content)
 
     def test_rejects_symlink_inputs_and_destinations_without_touching_targets(self):
         marker = self.root / "marker"
@@ -114,6 +127,9 @@ class LauncherTests(unittest.TestCase):
         (self.ui / "assets").mkdir(parents=True)
         (self.ui / "index.html").write_text("built UI")
         (self.ui / "assets" / "app.js").write_text("built asset")
+        (self.ui / "login" / "assets").mkdir(parents=True)
+        (self.ui / "login" / "index.html").write_text("built login")
+        (self.ui / "login" / "assets" / "login.js").write_text("built login asset")
         self.location = patch.object(_server, "__file__", str(self.package / "_server.py"))
         self.location.start()
         self.addCleanup(self.location.stop)
@@ -133,18 +149,17 @@ class LauncherTests(unittest.TestCase):
             execute(build_parser().parse_args([
                 "serve", "--data-dir", str(self.root / "data with spaces"),
                 "--listen", "127.0.0.1:0", "--ui-dir", str(custom),
-                "--hostmon-url", "http://127.0.0.1:1/?literal=$HOME",
-                "--hot-capacity", "42", "--scrape-concurrency", "3",
+                "--scrape-concurrency", "3",
             ]))
         self.assertEqual(replace.call_args.args[1], [
             str(self.binary), "--data-dir", str(self.root / "data with spaces"),
             "--ui-dir", str(custom), "--listen", "127.0.0.1:0",
-            "--hostmon-url", "http://127.0.0.1:1/?literal=$HOME",
-            "--hot-capacity", "42", "--scrape-concurrency", "3",
+            "--scrape-concurrency", "3",
         ])
 
     def test_missing_binary_and_ui_report_complete_rebuild_instructions(self):
-        for missing in (self.binary, self.ui / "index.html", self.ui / "assets" / "app.js"):
+        for missing in (self.binary, self.ui / "index.html", self.ui / "assets" / "app.js",
+                        self.ui / "login" / "index.html", self.ui / "login" / "assets" / "login.js"):
             content = missing.read_bytes()
             mode = missing.stat().st_mode
             missing.unlink()

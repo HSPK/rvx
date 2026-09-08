@@ -1,30 +1,40 @@
+mod access;
+mod auth;
+mod connection;
 mod delivery;
+mod ui;
+
+pub use access::AccessPolicy;
+pub use connection::UiConnections;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use rvx_core::{
-    QueryRequest, RunStatus, SnapshotDiffRequest, SnapshotHistoryRequest, SnapshotLatestRequest,
-    SnapshotQueryRequest, SourceRegistration, SourceState, SummaryRequest,
+    ChartCatalogRequest, RunStatus, SnapshotDiffRequest, SnapshotHistoryRequest,
+    SnapshotLatestRequest, SnapshotQueryRequest, SourceRegistration, SourceState,
+    TableCatalogRequest, TableRowsRequest, TableSummaryRequest,
 };
-use rvx_engine::{Engine, EngineError};
+use rvx_engine::{Engine, EngineError, TableReadControl};
+use rvx_core::{SnapshotAggregateRequest, SnapshotRecordsRequest};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use delivery::{Hostmon, HOSTMON_ROUTES};
-
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<Engine>,
-    hostmon: Hostmon,
+    auth: auth::AuthState,
+    connections: UiConnections,
+    secure_browser_cookie: bool,
+    ui_index: PathBuf,
 }
 
 #[derive(Debug)]
@@ -44,8 +54,17 @@ impl From<serde_json::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        if let EngineError::UiConflict { error, current } = self.0 {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": error, "current": current})),
+            )
+                .into_response();
+        }
         let status = match self.0 {
-            EngineError::InvalidInput(_) | EngineError::Protocol(_) => StatusCode::BAD_REQUEST,
+            EngineError::InvalidInput(_)
+            | EngineError::Protocol(_)
+            | EngineError::UiBootstrap(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({"error": self.0.to_string()}))).into_response()
@@ -110,25 +129,58 @@ struct RunFilter {
     run_id: Option<String>,
 }
 
-pub fn application(
+pub fn application(engine: Arc<Engine>, ui_directory: PathBuf) -> anyhow::Result<Router> {
+    application_with_access(engine, ui_directory, AccessPolicy::local_only())
+}
+
+/// Build the same UI/API router with an explicit authentication and origin policy.
+pub fn application_with_access(
     engine: Arc<Engine>,
     ui_directory: PathBuf,
-    hostmon_url: &str,
+    access: AccessPolicy,
 ) -> anyhow::Result<Router> {
-    let hostmon = Hostmon::new(hostmon_url)?;
-    let index = ServeFile::new(ui_directory.join("index.html"));
-    let mut router = Router::new()
+    application_with_access_and_connections(engine, ui_directory, access, UiConnections::new())
+}
+
+/// Build the standard router with an explicit WebSocket task owner for coordinated native shutdown.
+pub fn application_with_access_and_connections(
+    engine: Arc<Engine>,
+    ui_directory: PathBuf,
+    access: AccessPolicy,
+    connections: UiConnections,
+) -> anyhow::Result<Router> {
+    let secure_browser_cookie = access.secure_browser_cookie();
+    let auth = auth::AuthState::new(access, engine.clone())?;
+    let ui_index = ui_directory.join("index.html");
+    let login = ServeFile::new(ui_directory.join("login/index.html"));
+    let router = Router::new()
+        .route_service("/login", login.clone())
+        .route_service("/login/", login)
+        .nest_service(
+            "/login/assets",
+            ServeDir::new(ui_directory.join("login/assets")),
+        )
+        .route("/api/auth/session", get(auth::session))
+        .route(
+            "/api/auth/login",
+            post(auth::login).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/ui/state", get(ui::state))
+        .route(
+            "/api/ui/workspaces",
+            put(ui::workspaces).layer(DefaultBodyLimit::max(rvx_core::MAX_UI_REQUEST_BYTES)),
+        )
+        .route(
+            "/api/ui/browser",
+            put(ui::browser).layer(DefaultBodyLimit::max(rvx_core::MAX_UI_REQUEST_BYTES)),
+        )
+        .route("/api/ui/connection", get(connection::upgrade))
         .route("/", get(|| async { Redirect::temporary("/rvx") }))
-        // Legacy UI bookmarks are redirects, not additional SPA roots.
-        .route("/ryx", get(delivery::legacy_ui_redirect))
-        .route("/ryx/", get(delivery::legacy_ui_redirect))
-        .route("/ryx/*path", get(delivery::legacy_ui_redirect))
-        .route_service("/rvx", index.clone())
-        .route_service("/rvx/", index.clone())
-        .route_service("/rvx/*path", index)
+        .route("/rvx", get(ui::index))
+        .route("/rvx/", get(ui::index))
+        .route("/rvx/*path", get(ui::index))
         .nest_service("/assets", ServeDir::new(ui_directory.join("assets")))
-        .route("/hostmon", get(delivery::hostmon_redirect))
-        .route("/api/hostmon", get(delivery::hostmon_info))
         .route("/healthz", get(health))
         .route("/api/experiments/stats", get(stats))
         .route(
@@ -146,20 +198,38 @@ pub fn application(
             get(sources).post(register_source),
         )
         .route("/api/experiments/sources/:source_id", patch(update_source))
-        .route("/api/experiments/query", post(query_metrics))
-        .route("/api/experiments/query-summaries", post(query_summaries))
+        .route("/api/charts/catalog", post(chart_catalog))
+        .route("/api/tables/summary", post(table_summary))
+        .route("/api/tables/catalog", post(table_catalog))
+        .route("/api/tables/rows", post(table_rows))
+        .route("/api/snapshots/:id", get(snapshot_get))
         .route("/api/snapshots/latest", post(snapshot_latest))
         .route("/api/snapshots/history", post(snapshot_history))
         .route("/api/snapshots/query", post(snapshot_query))
-        .route("/api/snapshots/diff", post(snapshot_diff));
-    for route in HOSTMON_ROUTES {
-        router = router.route(route, get(delivery::proxy_hostmon));
-    }
+        .route("/api/snapshots/diff", post(snapshot_diff))
+        .route("/api/snapshots/aggregate", post(snapshot_aggregate))
+        .route("/api/snapshots/records", post(snapshot_records));
     Ok(router
         .fallback(delivery::not_found)
-        .layer(middleware::from_fn(delivery::protect_mutations))
-        .layer(TraceLayer::new_for_http())
-        .with_state(AppState { engine, hostmon }))
+        .layer(middleware::from_fn_with_state(auth.clone(), access::protect))
+        // Route templates omit credentials that callers might place in URLs, headers, or bodies.
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::extract::Request| {
+                let route = request
+                    .extensions()
+                    .get::<axum::extract::MatchedPath>()
+                    .map(|path| path.as_str())
+                    .unwrap_or("<unmatched>");
+                tracing::debug_span!("request", method = %request.method(), route)
+            }),
+        )
+        .with_state(AppState {
+            engine,
+            auth,
+            connections,
+            secure_browser_cookie,
+            ui_index,
+        }))
 }
 
 async fn health() -> &'static str {
@@ -282,23 +352,20 @@ async fn update_source(
     )?))
 }
 
-async fn query_metrics(
+/// Serve index-derived discovery on a blocking worker rather than the async HTTP executor.
+async fn chart_catalog(
     State(state): State<AppState>,
-    Json(request): Json<QueryRequest>,
+    Json(request): Json<ChartCatalogRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    blocking(move || Ok(serde_json::to_value(state.engine.query(&request)?)?)).await
+    blocking(move || Ok(serde_json::to_value(state.engine.chart_catalog(&request)?)?)).await
 }
 
-async fn query_summaries(
+/// Resolve storage IDs to flattened raw observations while retaining chart-point provenance.
+async fn snapshot_get(
     State(state): State<AppState>,
-    Json(request): Json<SummaryRequest>,
+    Path(id): Path<i64>,
 ) -> Result<Json<Value>, ApiError> {
-    blocking(move || {
-        Ok(serde_json::to_value(
-            state.engine.query_summaries(&request)?,
-        )?)
-    })
-    .await
+    blocking(move || Ok(serde_json::to_value(state.engine.snapshot_get(id)?)?)).await
 }
 
 async fn snapshot_latest(
@@ -342,6 +409,86 @@ async fn snapshot_diff(
     Json(request): Json<SnapshotDiffRequest>,
 ) -> Result<Json<Value>, ApiError> {
     blocking(move || Ok(serde_json::to_value(state.engine.snapshot_diff(&request)?)?)).await
+}
+
+/// Preserve the shared access middleware and cancel only the abandoned table request.
+async fn table_summary(
+    State(state): State<AppState>,
+    request: Result<Json<TableSummaryRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = request.map_err(table_json_error)?;
+    table_blocking(move |control| {
+        Ok(serde_json::to_value(
+            state.engine.table_summary_controlled(&request, &control)?,
+        )?)
+    })
+    .await
+}
+
+async fn table_catalog(
+    State(state): State<AppState>,
+    request: Result<Json<TableCatalogRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = request.map_err(table_json_error)?;
+    table_blocking(move |control| {
+        Ok(serde_json::to_value(
+            state.engine.table_catalog_controlled(&request, &control)?,
+        )?)
+    })
+    .await
+}
+
+async fn table_rows(
+    State(state): State<AppState>,
+    request: Result<Json<TableRowsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = request.map_err(table_json_error)?;
+    table_blocking(move |control| {
+        Ok(serde_json::to_value(
+            state.engine.table_rows_controlled(&request, &control)?,
+        )?)
+    })
+    .await
+}
+
+async fn snapshot_aggregate(
+    State(state): State<AppState>,
+    request: Result<Json<SnapshotAggregateRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = request.map_err(table_json_error)?;
+    table_blocking(move |control| Ok(serde_json::to_value(
+        state.engine.snapshot_aggregate_controlled(&request, &control)?,
+    )?)).await
+}
+
+async fn snapshot_records(
+    State(state): State<AppState>,
+    request: Result<Json<SnapshotRecordsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = request.map_err(table_json_error)?;
+    table_blocking(move |control| Ok(serde_json::to_value(
+        state.engine.snapshot_records_controlled(&request, &control)?,
+    )?)).await
+}
+
+struct CancelTableOnDrop(TableReadControl);
+
+fn table_json_error(error: axum::extract::rejection::JsonRejection) -> ApiError {
+    ApiError(EngineError::InvalidInput(error.body_text()))
+}
+
+impl Drop for CancelTableOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn table_blocking(
+    work: impl FnOnce(TableReadControl) -> Result<Value, ApiError> + Send + 'static,
+) -> Result<Json<Value>, ApiError> {
+    let guard = CancelTableOnDrop(TableReadControl::default());
+    let control = guard.0.clone();
+    blocking(move || work(control)).await
 }
 
 async fn blocking(

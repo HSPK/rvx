@@ -25,7 +25,6 @@ class RvxService:
             ) from error
         self._engine = RvxEngine(
             str(settings.directory),
-            settings.hot_capacity,
             settings.scrape_concurrency,
             False,
         )
@@ -193,6 +192,14 @@ class RvxService:
         """Read a bounded page of latest full states for one Run."""
         return self._snapshot_read("snapshot_latest", payload)
 
+    def chart_catalog(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Discover recorded chart fields and their current Source summaries."""
+        return self._snapshot_read("chart_catalog", payload)
+
+    def snapshot_get(self, snapshot_id: int) -> dict[str, Any]:
+        """Read the exact original observation identified by a chart point."""
+        return self._decode(self._require().snapshot_get(snapshot_id))
+
     def snapshot_history(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Read newest-first immutable states with a storage-ID continuation."""
         return self._snapshot_read("snapshot_history", payload)
@@ -210,30 +217,6 @@ class RvxService:
         return self._decode(getattr(self._require(), method)(
             json.dumps(payload, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
         ))
-
-    def legacy_query(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Read numeric history from pre-snapshot deployments only."""
-        return self._decode(
-            self._require().legacy_query_json(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            )
-        )
-
-    def legacy_query_summaries(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Read summaries of previously persisted legacy numeric history."""
-        return self._decode(
-            self._require().legacy_query_summaries_json(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            )
-        )
-
-    def legacy_query_arrow(self, payload: dict[str, Any]) -> bytes:
-        """Read legacy numeric history as an Arrow IPC stream."""
-        return bytes(
-            self._require().legacy_query_arrow(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            )
-        )
 
     def _require(self) -> Any:
         """Return the active engine or reject disabled API access."""

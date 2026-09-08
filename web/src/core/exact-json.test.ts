@@ -1,7 +1,6 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {ApiClient} from "./api-client";
-import {exactProperty, parseExactJson, stringifyExact} from "./exact-json";
-import {diffValue, jsonPreview, numericFields} from "../rvx/snapshot-utils";
+import {exactProperty, parseExactJson, parseExactProjection, stringifyExact} from "./exact-json";
 import type {SnapshotDiffResponse, SnapshotLatestResponse} from "../domain/snapshots";
 
 const state = '{"big":9007199254740993,"max":18446744073709551615,"min":-9223372036854775808,"array":[9007199254740993,null,true],"decimal":1.0000000000000001,"negative_zero":-0,"text":"9007199254740993 \\"quoted\\""}';
@@ -20,18 +19,16 @@ describe("exact raw snapshot JSON", () => {
     expect(exactProperty(snapshot, "observed_at_ns")).toBe("1788595200000000123");
     expect(exactProperty(snapshot, "ingested_at_ns")).toBe("1788595200000000789");
     expect(stringifyExact(snapshot)).toBe(wire.slice('{"snapshots":['.length, wire.indexOf('],"next_source_id"')));
-    expect(jsonPreview(snapshot.state).text).toContain('"big": 9007199254740993');
-    expect(jsonPreview(snapshot.state, 12)).toEqual({text: stringifyExact(snapshot.state, 2).slice(0, 12), truncated: true});
-    expect(numericFields(snapshot.state).paths).toContain("/big");
+    expect(exactProperty(snapshot.state, "big")).toBe("9007199254740993");
   });
 
   it("preserves scalar diff numbers, nested numbers, null, and absent properties", () => {
     const response = parseExactJson<SnapshotDiffResponse>('{"before_id":1,"after_id":2,"truncated":false,"changes":[{"kind":"changed","path":"/big","before":9007199254740993,"after":18446744073709551615},{"kind":"added","path":"/nested","after":{"n":-9223372036854775808}},{"kind":"removed","path":"/null","before":null}]}');
-    expect(diffValue(response.changes[0]!, "before")).toBe("9007199254740993");
-    expect(diffValue(response.changes[0]!, "after")).toBe("18446744073709551615");
-    expect(diffValue(response.changes[1]!, "after")).toBe('{"n":-9223372036854775808}');
-    expect(diffValue(response.changes[2]!, "before")).toBe("null");
-    expect(diffValue(response.changes[2]!, "after")).toBe("(absent)");
+    expect(exactProperty(response.changes[0]!, "before")).toBe("9007199254740993");
+    expect(exactProperty(response.changes[0]!, "after")).toBe("18446744073709551615");
+    expect(exactProperty(response.changes[1]!, "after")).toBe('{"n":-9223372036854775808}');
+    expect(exactProperty(response.changes[2]!, "before")).toBe("null");
+    expect(Object.hasOwn(response.changes[2]!, "after")).toBe(false);
   });
 
   it("does not apply retained lexemes to subsequently changed values", () => {
@@ -59,23 +56,25 @@ describe("exact raw snapshot JSON", () => {
     expect(() => parseExactJson(wire)).toThrow("native JSON.parse source context");
   });
 
-  it("uses the exact codec for latest/history/diff transport without changing numeric projection types", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(
-      url.endsWith("/diff")
-        ? '{"before_id":1,"after_id":2,"truncated":false,"changes":[{"kind":"changed","path":"/n","before":9007199254740993,"after":18446744073709551615}]}'
-        : url.endsWith("/query")
-          ? '{"axis":"wall_time","series":[{"values":[1.5,null]}]}'
-          : wire,
+  it("retains exact projection IDs without changing numeric values or fetching raw snapshots", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      '{"axis":"wall_time","series":[{"snapshot_ids":[9007199254740993,18446744073709551615],"values":[1.5,null]}]}',
       {headers: {"Content-Type": "application/json"}},
     )));
     const api = new ApiClient();
-    const latest = await api.snapshotLatest({run_id: "r"});
-    expect(stringifyExact(latest.snapshots[0])).toContain('"observed_at_ns":1788595200000000123');
-    const history = await api.snapshotHistory({run_id: "r"});
-    expect(stringifyExact(history.snapshots[0])).toContain('"max":18446744073709551615');
-    const diff = await api.snapshotDiff({before_id: 1, after_id: 2});
-    expect(diffValue(diff.changes[0]!, "before")).toBe("9007199254740993");
-    const query = await api.snapshotQuery({run_ids: ["r"], paths: ["/n"]});
+    const query = await api.query({run_ids: ["r"], paths: ["/n"]});
     expect(query.series[0]!.values).toEqual([1.5, null]);
+    expect(exactProperty(query.series[0]!.snapshot_ids, "0")).toBe("9007199254740993");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith("/api/snapshots/query", expect.objectContaining({credentials: "same-origin"}));
+  });
+
+  it("cooperatively decodes trace sidecars without cloning or confusing escaped metadata with structure", async () => {
+    const wire = '{"axis":"series","series":[{"path":"/a}b","source_id":"\\"series\\":[{\\"id\\":5}]","snapshot_ids":[9007199254740993],"sequences":[18446744073709551615],"values":[1.0000000000000001],"axes":[-9223372036854775808],"observed_at_ns":[1788595200000000123]},{"path":"/x","snapshot_ids":[2],"values":[null]}]}';
+    const query = await parseExactProjection(wire);
+    expect(stringifyExact(query)).toBe(wire);
+    expect(exactProperty(query.series[0]!.snapshot_ids, "0")).toBe("9007199254740993");
+    const controller = new AbortController(); controller.abort();
+    await expect(parseExactProjection(wire, controller.signal)).rejects.toMatchObject({name: "AbortError"});
   });
 });

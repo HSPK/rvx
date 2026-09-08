@@ -26,10 +26,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     """Expose native options without overriding defaults owned by rvxd."""
     parser.add_argument("--version", action="version", version=f"%(prog)s {package_version()}")
     parser.add_argument("--data-dir", required=True, help="persistent storage owned by this daemon")
-    parser.add_argument("--listen", help="loopback bind address (native default: 127.0.0.1:9110)")
+    parser.add_argument("--listen", help="bind address; non-loopback requires RVX_API_TOKEN (default: 127.0.0.1:9110)")
     parser.add_argument("--ui-dir", help="override the bundled built Web UI directory")
-    parser.add_argument("--hostmon-url", help="Hostmon navigation URL (native default: http://127.0.0.1:9108)")
-    parser.add_argument("--hot-capacity", help="native hot-buffer capacity")
     parser.add_argument("--scrape-concurrency", help="native concurrent Pull limit")
 
 
@@ -167,6 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
     diff = snapshot_actions.add_parser("diff")
     diff.add_argument("--before-id", type=int, required=True)
     diff.add_argument("--after-id", type=int, required=True)
+    snapshot_get = snapshot_actions.add_parser("get")
+    snapshot_get.add_argument("id", type=int)
+    catalog = commands.add_parser("catalog", help="discover recorded chart fields")
+    catalog.add_argument("--run", action="append", required=True)
 
     query = commands.add_parser("query", help="derive numeric field trends from snapshots")
     query.add_argument("--run", action="append", required=True)
@@ -175,16 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument(
         "--axis",
         default="wall_time",
-        help="query axis (default: wall_time); use a logical axis explicitly",
+        help="wall_time (default), elapsed, or an explicit logical axis",
     )
     query.add_argument("--max-points", type=int, default=1600)
     query.add_argument("--from", dest="from_ns", type=int)
     query.add_argument("--to", dest="to_ns", type=int)
-    legacy = commands.add_parser("legacy-query", help="read pre-snapshot numeric history only")
-    legacy.add_argument("--run", required=True)
-    legacy.add_argument("--metric", action="append", required=True)
-    legacy.add_argument("--axis", default="wall_time")
-    legacy.add_argument("--max-points", type=int, default=1600)
     return parser
 
 
@@ -194,7 +191,6 @@ def execute(args: argparse.Namespace) -> Any:
         from ._server import serve
         return serve(
             data_dir=args.data_dir, listen=args.listen, ui_dir=args.ui_dir,
-            hostmon_url=args.hostmon_url, hot_capacity=args.hot_capacity,
             scrape_concurrency=args.scrape_concurrency,
         )
     if args.command == "status":
@@ -287,6 +283,8 @@ def execute(args: argparse.Namespace) -> Any:
             },
         )
     if args.command == "snapshots":
+        if args.action == "get":
+            return api_request(args.url, f"/api/snapshots/{args.id}")
         if args.action == "diff":
             payload = {"before_id": args.before_id, "after_id": args.after_id}
         else:
@@ -307,17 +305,12 @@ def execute(args: argparse.Namespace) -> Any:
                 "from": args.from_ns, "to": args.to_ns,
             },
         )
-    if args.command == "legacy-query":
+    if args.command == "catalog":
         return api_request(
             args.url,
-            "/api/experiments/query",
+            "/api/charts/catalog",
             method="POST",
-            payload={
-                "run_id": args.run,
-                "metrics": args.metric,
-                "axis": args.axis,
-                "max_points": args.max_points,
-            },
+            payload={"run_ids": args.run},
         )
     raise RuntimeError(f"unsupported Rvx command: {args.command}")
 

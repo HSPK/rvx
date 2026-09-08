@@ -23,7 +23,7 @@ BINARY = Path(os.environ.get("RVXD_BINARY", ROOT / "target/debug/rvxd"))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Inspect navigation targets without contacting the configured hostmon."""
+    """Keep redirect responses available for same-origin assertions."""
 
     def redirect_request(self, request, response, code, message, headers, new_url):
         """Leave redirect responses available for exact Location assertions."""
@@ -141,7 +141,10 @@ class RvxProcessTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(stats["snapshots"], 24)
                 self.assertEqual(stats["active_sources"], 8)
-                self.assertEqual(stats["ingested_points"], 0)
+                self.assertEqual(set(stats), {
+                    "projects", "experiments", "runs", "sources", "active_sources",
+                    "snapshots", "cursor_gaps", "scrape_failures",
+                })
                 self.assertEqual(stats["cursor_gaps"], 0)
                 self.assertEqual(stats["scrape_failures"], 0)
 
@@ -245,7 +248,6 @@ class RvxProcessTests(unittest.TestCase):
                 "--data-dir", str(fixture / "data"),
                 "--listen", "127.0.0.1:0",
                 "--ui-dir", str(ui),
-                "--hostmon-url", "http://127.0.0.1:1",
             ]
             project = None
             run = None
@@ -319,15 +321,12 @@ class RvxProcessTests(unittest.TestCase):
                     with urllib.request.urlopen(f"{base}/rvx/projects", timeout=5) as response:
                         self.assertIn(b"<title>fixture</title>", response.read())
                     navigation = urllib.request.build_opener(NoRedirect)
-                    for page in ("settings", "layouts"):
+                    for path in ("/hostmon", "/api/hostmon", "/ryx"):
                         with self.assertRaises(urllib.error.HTTPError) as redirect:
-                            navigation.open(f"{base}/hostmon?page={page}", timeout=5)
+                            navigation.open(f"{base}{path}", timeout=5)
                         with redirect.exception as response:
-                            self.assertEqual(response.code, 307)
-                            self.assertEqual(
-                                response.headers["Location"],
-                                f"http://127.0.0.1:1/?page={page}",
-                            )
+                            self.assertEqual(response.code, 404)
+                            self.assertIsNone(response.headers["Location"])
                     with self.assertRaises(urllib.error.HTTPError) as missing:
                         urllib.request.urlopen(f"{base}/api/unknown", timeout=5)
                     with missing.exception as response:

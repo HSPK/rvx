@@ -1,12 +1,13 @@
 use std::path::Path;
 
 use parking_lot::Mutex;
-#[cfg(test)]
-use rusqlite::Transaction;
 use rusqlite::{params, Connection, OptionalExtension};
 use rvx_core::{new_id, now_ns, Experiment, Project, Run, RunStatus, Source, SourceState};
 
 use crate::{EngineError, Result};
+
+mod ui;
+mod auth;
 
 pub struct Repository {
     connection: Mutex<Connection>,
@@ -56,28 +57,15 @@ impl Repository {
                 timeout_ms INTEGER NOT NULL,
                 UNIQUE(run_id, endpoint)
             );
-            CREATE TABLE IF NOT EXISTS cursors (
-                source_id TEXT NOT NULL,
-                source_session_id TEXT NOT NULL,
-                next_sequence INTEGER NOT NULL,
-                updated_at_ns INTEGER NOT NULL,
-                PRIMARY KEY(source_id, source_session_id)
-            );
             CREATE TABLE IF NOT EXISTS source_descriptors (
                 source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
                 descriptor_json TEXT NOT NULL,
                 updated_at_ns INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS cursor_gaps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id TEXT NOT NULL,
-                source_session_id TEXT NOT NULL,
-                expected_sequence INTEGER NOT NULL,
-                oldest_sequence INTEGER NOT NULL,
-                observed_at_ns INTEGER NOT NULL
-            );
             ",
         )?;
+        ui::initialize(&connection)?;
+        auth::initialize(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -291,6 +279,47 @@ impl Repository {
             .ok_or_else(|| EngineError::InvalidInput("source registration failed".into()))
     }
 
+    /// Validate table ownership and bound metadata before any snapshot read.
+    pub(crate) fn table_sources(&self, runs: &[String], ids: &[String]) -> Result<Vec<Source>> {
+        let connection = self.connection.lock();
+        for run in runs {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?)",
+                [run],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(EngineError::InvalidInput(format!("unknown Run {run:?}")));
+            }
+        }
+        let mut values = runs.to_vec();
+        let mut filter = format!("run_id IN ({})", vec!["?"; runs.len()].join(","));
+        if !ids.is_empty() {
+            filter.push_str(&format!(" AND id IN ({})", vec!["?"; ids.len()].join(",")));
+            values.extend_from_slice(ids);
+        }
+        let mut statement = connection.prepare(&format!(
+            "SELECT id,run_id,attempt_id,role,endpoint,node_id,rank,state,
+                    source_session_id,last_success_at_ns,last_error,scrape_interval_ms,timeout_ms,
+                    (SELECT descriptor_json FROM source_descriptors WHERE source_id=sources.id)
+             FROM sources WHERE {filter} ORDER BY run_id,id LIMIT 257"
+        ))?;
+        let sources = statement
+            .query_map(rusqlite::params_from_iter(values), source_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if sources.len() > rvx_core::MAX_SNAPSHOT_SOURCE_IDS {
+            return Err(EngineError::InvalidInput(
+                "table selection exceeds 256 Sources; narrow run_ids/source_ids".into(),
+            ));
+        }
+        if ids.iter().any(|id| !sources.iter().any(|s| &s.id == id)) {
+            return Err(EngineError::InvalidInput(
+                "unknown source_ids or Source does not belong to selected run_ids".into(),
+            ));
+        }
+        Ok(sources)
+    }
+
     pub fn list_sources(&self, run_id: Option<&str>) -> Result<Vec<Source>> {
         let connection = self.connection.lock();
         let sql = if run_id.is_some() {
@@ -422,53 +451,6 @@ impl Repository {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn cursor(&self, source_id: &str, session_id: &str) -> Result<Option<u64>> {
-        let value = self
-            .connection
-            .lock()
-            .query_row(
-                "SELECT next_sequence FROM cursors
-                 WHERE source_id=?1 AND source_session_id=?2",
-                params![source_id, session_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| {
-                u64::try_from(value)
-                    .map_err(|_| EngineError::InvalidInput("stored cursor is negative".into()))
-            })
-            .transpose()
-    }
-
-    #[cfg(test)]
-    pub fn commit_cursor(
-        &self,
-        source_id: &str,
-        session_id: &str,
-        next_sequence: u64,
-        gap: Option<(u64, u64)>,
-    ) -> Result<()> {
-        let next = i64::try_from(next_sequence)
-            .map_err(|_| EngineError::InvalidInput("cursor exceeds i64".into()))?;
-        let mut connection = self.connection.lock();
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO cursors(source_id, source_session_id, next_sequence, updated_at_ns)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(source_id, source_session_id) DO UPDATE SET
-                next_sequence=MAX(cursors.next_sequence, excluded.next_sequence),
-                updated_at_ns=excluded.updated_at_ns",
-            params![source_id, session_id, next, now_ns()],
-        )?;
-        if let Some((expected, oldest)) = gap {
-            record_gap(&transaction, source_id, session_id, expected, oldest)?;
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
     pub fn counts(&self) -> Result<(u64, u64, u64, u64, u64)> {
         let connection = self.connection.lock();
         let count = |table: &str| -> Result<u64> {
@@ -508,32 +490,6 @@ impl Repository {
             )
             .optional()?)
     }
-}
-
-#[cfg(test)]
-fn record_gap(
-    transaction: &Transaction<'_>,
-    source_id: &str,
-    session_id: &str,
-    expected: u64,
-    oldest: u64,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO cursor_gaps(
-            source_id, source_session_id, expected_sequence,
-            oldest_sequence, observed_at_ns
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            source_id,
-            session_id,
-            i64::try_from(expected)
-                .map_err(|_| EngineError::InvalidInput("cursor exceeds i64".into()))?,
-            i64::try_from(oldest)
-                .map_err(|_| EngineError::InvalidInput("cursor exceeds i64".into()))?,
-            now_ns()
-        ],
-    )?;
-    Ok(())
 }
 
 fn source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {

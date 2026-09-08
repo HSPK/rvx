@@ -1,43 +1,49 @@
-mod cold_store;
-mod hot_store;
+mod chart_index;
+mod auth_sessions;
 mod repository;
 mod snapshot_store;
-mod wal;
+mod snapshot_views;
+mod ui_state;
+
+pub use ui_state::{valid_browser_id, UiSession};
+pub use auth_sessions::{AUTH_SESSION_SECONDS, MAX_AUTH_SESSIONS};
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rvx_core::{
-    new_id, now_ns, validate_snapshot_descriptor, EngineStats, Experiment, Project, QueryRequest,
-    QueryResponse, Run, RunStatus, RunSummary, SnapshotDescriptor, SnapshotDiffRequest,
+    new_id, now_ns, validate_snapshot_descriptor, ChartCatalogRequest, ChartCatalogResponse,
+    EngineStats, Experiment, Project, Run, RunStatus, SnapshotDescriptor, SnapshotDiffRequest,
     SnapshotDiffResponse, SnapshotHistoryPage, SnapshotHistoryRequest, SnapshotHistoryResponse,
     SnapshotLatestRequest, SnapshotLatestResponse, SnapshotQueryRequest, SnapshotQueryResponse,
-    Source, SourceRegistration, SourceState, SummaryRequest, SummaryResponse,
+    Source, SourceRegistration, SourceState, StoredSnapshot,
+    TableCatalogRequest, TableCatalogResponse, TableRowsRequest, TableRowsResponse,
+    TableSummaryRequest, TableSummaryResponse,
 };
-#[cfg(test)]
-use rvx_core::{validate_points_response, MetricBatch, PointsResponse};
 use thiserror::Error;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
 
-use cold_store::ColdStore;
-use hot_store::merge_responses;
-use hot_store::HotStore;
 use repository::Repository;
 use snapshot_store::SnapshotStore;
-use wal::MetricWal;
-
-const MAX_SUMMARY_RUNS: usize = 1_000;
-const MAX_SUMMARY_METRICS: usize = 128;
-const SUMMARY_QUERY_THREADS: usize = 8;
+pub use snapshot_store::tables::TableReadControl;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
+    #[error("authentication sessions are temporarily unavailable")]
+    AuthSessionUnavailable,
+    #[error("{error}")]
+    UiConflict {
+        error: String,
+        current: serde_json::Value,
+    },
+    #[error("{0}")]
+    UiBootstrap(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("protocol error: {0}")]
@@ -48,14 +54,8 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("Arrow error: {0}")]
-    Arrow(#[from] arrow::error::ArrowError),
-    #[error("Parquet error: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("corrupt metric WAL: {0}")]
-    CorruptWal(String),
     #[error("runtime error: {0}")]
     Runtime(String),
 }
@@ -64,57 +64,33 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 
 #[derive(Default)]
 struct Counters {
-    ingested_points: AtomicU64,
-    duplicate_points: AtomicU64,
-    cursor_gaps: AtomicU64,
     scrape_failures: AtomicU64,
-    compacted_values: AtomicU64,
 }
 
 pub struct Engine {
     repository: Repository,
     snapshots: SnapshotStore,
     scrape_owners: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    wal: MetricWal,
-    cold: ColdStore,
-    hot: HotStore,
     client: reqwest::Client,
     counters: Counters,
 }
 
 impl Engine {
-    pub fn open(directory: impl AsRef<Path>, hot_capacity: usize) -> Result<Arc<Self>> {
+    pub fn open(directory: impl AsRef<Path>) -> Result<Arc<Self>> {
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory)?;
         let repository = Repository::open(&directory.join("metadata.db"))?;
         let snapshots = SnapshotStore::open(&directory.join("snapshots.db"))?;
-        #[cfg(test)]
-        let (wal, recovered) = MetricWal::open(&directory.join("metrics.wal"))?;
-        #[cfg(not(test))]
-        let (wal, recovered) = MetricWal::open_read_only(&directory.join("metrics.wal"))?;
-        // Legacy WAL no longer compacts in production: retain every archived observation for reads.
-        let hot_capacity = hot_capacity.max(recovered.iter().map(|b| b.points.len()).sum());
-        let cold = ColdStore::open(directory.join("parquet"))?;
         let engine = Arc::new(Self {
             repository,
             snapshots,
             scrape_owners: parking_lot::Mutex::new(HashMap::new()),
-            wal,
-            cold,
-            hot: HotStore::new(hot_capacity),
             client: reqwest::Client::builder()
                 .pool_idle_timeout(Duration::from_secs(60))
                 .tcp_nodelay(true)
                 .build()?,
             counters: Counters::default(),
         });
-        for batch in recovered {
-            engine.hot.append(&batch);
-            engine
-                .counters
-                .ingested_points
-                .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
-        }
         Ok(engine)
     }
 
@@ -147,7 +123,7 @@ impl Engine {
         self.repository.update_run_status(run_id, status)
     }
 
-    /// Register an HTTP(S) role API without altering previously stored archive sources.
+    /// Register an HTTP(S) role API.
     pub fn register_source(&self, registration: &SourceRegistration) -> Result<Source> {
         for (field, value) in [
             ("run_id", registration.run_id.as_str()),
@@ -218,158 +194,6 @@ impl Engine {
         self.repository.update_source_state(source_id, state)
     }
 
-    #[cfg(test)]
-    fn ingest(&self, mut batch: MetricBatch) -> Result<usize> {
-        let response = PointsResponse {
-            protocol_version: rvx_core::PROTOCOL_VERSION,
-            source_session_id: batch.source_session_id.clone(),
-            oldest_sequence: batch.oldest_sequence,
-            next_sequence: batch.next_sequence,
-            dropped_before: batch.dropped_before,
-            points: batch.points.clone(),
-        };
-        validate_points_response(&response)?;
-        let committed = self
-            .repository
-            .cursor(&batch.source_id, &batch.source_session_id)?
-            .unwrap_or(batch.oldest_sequence);
-        let gap = (batch.oldest_sequence > committed).then_some((committed, batch.oldest_sequence));
-        if gap.is_some() {
-            self.counters.cursor_gaps.fetch_add(1, Ordering::Relaxed);
-        }
-        let before = batch.points.len();
-        batch.points.retain(|point| point.sequence >= committed);
-        self.counters
-            .duplicate_points
-            .fetch_add((before - batch.points.len()) as u64, Ordering::Relaxed);
-        for point in &mut batch.points {
-            if point.ingest_time_ns == 0 {
-                point.ingest_time_ns = now_ns();
-            }
-        }
-        let accepted = batch.points.len();
-        if accepted > 0 || batch.next_sequence > committed {
-            self.wal.append(&batch)?;
-            self.repository.commit_cursor(
-                &batch.source_id,
-                &batch.source_session_id,
-                batch.next_sequence.max(committed),
-                gap,
-            )?;
-            self.hot.append(&batch);
-            self.counters
-                .ingested_points
-                .fetch_add(accepted as u64, Ordering::Relaxed);
-        }
-        Ok(accepted)
-    }
-
-    /// Read legacy numeric archives; new observations are ingested exclusively as snapshots.
-    pub fn query(&self, request: &QueryRequest) -> Result<QueryResponse> {
-        rvx_core::validate_name("run_id", &request.run_id)?;
-        rvx_core::validate_name("axis", &request.axis)?;
-        Ok(merge_responses(
-            request,
-            [self.cold.query(request)?, self.hot.query(request)],
-        ))
-    }
-
-    pub fn query_summaries(&self, request: &SummaryRequest) -> Result<SummaryResponse> {
-        if request.run_ids.len() > MAX_SUMMARY_RUNS {
-            return Err(EngineError::InvalidInput(format!(
-                "summary query exceeds {MAX_SUMMARY_RUNS} runs"
-            )));
-        }
-        if request.metrics.is_empty() || request.metrics.len() > MAX_SUMMARY_METRICS {
-            return Err(EngineError::InvalidInput(format!(
-                "summary query requires 1 to {MAX_SUMMARY_METRICS} metrics"
-            )));
-        }
-        for metric in &request.metrics {
-            rvx_core::validate_name("metric", metric)?;
-        }
-        let next = AtomicUsize::new(0);
-        let worker_count = request.run_ids.len().min(SUMMARY_QUERY_THREADS);
-        let summaries = std::thread::scope(|scope| {
-            let mut workers = Vec::with_capacity(worker_count);
-            for _ in 0..worker_count {
-                workers.push(scope.spawn(|| {
-                    let mut local = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(run_id) = request.run_ids.get(index) else {
-                            break;
-                        };
-                        local.push((index, self.query_summary(run_id, request)));
-                    }
-                    local
-                }));
-            }
-            let mut ordered = vec![None; request.run_ids.len()];
-            for worker in workers {
-                let values = worker
-                    .join()
-                    .map_err(|_| EngineError::Runtime("summary query worker panicked".into()))?;
-                for (index, summary) in values {
-                    ordered[index] = Some(summary?);
-                }
-            }
-            ordered
-                .into_iter()
-                .map(|summary| {
-                    summary.ok_or_else(|| {
-                        EngineError::Runtime("summary query result is missing".into())
-                    })
-                })
-                .collect::<Result<Vec<_>>>()
-        })?;
-        Ok(SummaryResponse { summaries })
-    }
-
-    fn query_summary(&self, run_id: &str, request: &SummaryRequest) -> Result<RunSummary> {
-        let response = self.query(&QueryRequest {
-            run_id: run_id.to_string(),
-            source_ids: Vec::new(),
-            metrics: request.metrics.clone(),
-            axis: request.axis.clone(),
-            from: request.from,
-            to: request.to,
-            max_points: 2,
-        })?;
-        let values = response
-            .series
-            .into_iter()
-            .filter_map(|series| {
-                series
-                    .values
-                    .last()
-                    .copied()
-                    .map(|value| (series.metric, value))
-            })
-            .collect();
-        Ok(RunSummary {
-            run_id: run_id.to_string(),
-            values,
-        })
-    }
-
-    #[cfg(test)]
-    fn compact(&self) -> Result<usize> {
-        let _ = self.wal.rotate()?;
-        let mut compacted = 0;
-        for segment in self.wal.sealed_paths()? {
-            let batches = MetricWal::read_records(&segment)?;
-            compacted += self.cold.write_segment(&segment, &batches)?;
-            self.hot.remove_batches(&batches);
-            std::fs::remove_file(segment)?;
-        }
-        self.counters
-            .compacted_values
-            .fetch_add(compacted as u64, Ordering::Relaxed);
-        trim_native_heap();
-        Ok(compacted)
-    }
-
     pub fn stats(&self) -> Result<EngineStats> {
         let (projects, experiments, runs, sources, active_sources) = self.repository.counts()?;
         Ok(EngineStats {
@@ -379,14 +203,7 @@ impl Engine {
             runs,
             sources,
             active_sources,
-            hot_points: self.hot.len() as u64,
-            parquet_files: self.cold.file_count()?,
-            wal_bytes: self.wal.size()?,
-            ingested_points: self.counters.ingested_points.load(Ordering::Relaxed),
-            duplicate_points: self.counters.duplicate_points.load(Ordering::Relaxed),
-            compacted_values: self.counters.compacted_values.load(Ordering::Relaxed),
-            cursor_gaps: self.counters.cursor_gaps.load(Ordering::Relaxed)
-                + self.snapshots.gap_count()?,
+            cursor_gaps: self.snapshots.gap_count()?,
             scrape_failures: self.counters.scrape_failures.load(Ordering::Relaxed),
         })
     }
@@ -409,11 +226,91 @@ impl Engine {
         self.snapshots.query(request)
     }
 
+    /// Resolve chart-point provenance to the original stored observation, including its full state.
+    pub fn snapshot_get(&self, id: i64) -> Result<StoredSnapshot> {
+        self.snapshots.get(id)
+    }
+
+    /// Join Source identities with indexed field availability and defaults without reading state histories.
+    pub fn chart_catalog(&self, request: &ChartCatalogRequest) -> Result<ChartCatalogResponse> {
+        if request.run_ids.is_empty() || request.run_ids.len() > rvx_core::MAX_SNAPSHOT_QUERY_RUNS {
+            return Err(EngineError::InvalidInput(
+                "catalog requires 1..64 run_ids".into(),
+            ));
+        }
+        let sources = request
+            .run_ids
+            .iter()
+            .map(|run| self.list_sources(Some(run)))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        self.snapshots.catalog(request, &sources)
+    }
+
+    /// Compute exact-range statistics over the complete covered numeric index, separated by Source.
+    pub fn table_summary(&self, request: &TableSummaryRequest) -> Result<TableSummaryResponse> {
+        self.table_summary_controlled(request, &TableReadControl::default())
+    }
+
+    /// Perform an exact summary with request-local cooperative cancellation.
+    pub fn table_summary_controlled(
+        &self,
+        request: &TableSummaryRequest,
+        control: &TableReadControl,
+    ) -> Result<TableSummaryResponse> {
+        control.check()?;
+        snapshot_store::tables::validate_selection(&request.run_ids, &request.source_ids)?;
+        let sources = self
+            .repository
+            .table_sources(&request.run_ids, &request.source_ids)?;
+        self.snapshots.table_summary(request, &sources, control)
+    }
+
+    /// Discover structured collections from current complete snapshots without returning raw state.
+    pub fn table_catalog(&self, request: &TableCatalogRequest) -> Result<TableCatalogResponse> {
+        self.table_catalog_controlled(request, &TableReadControl::default())
+    }
+
+    /// Discover table metadata with request-local cancellation and explicit truncation.
+    pub fn table_catalog_controlled(
+        &self,
+        request: &TableCatalogRequest,
+        control: &TableReadControl,
+    ) -> Result<TableCatalogResponse> {
+        control.check()?;
+        snapshot_store::tables::validate_selection(&request.run_ids, &request.source_ids)?;
+        let sources = self
+            .repository
+            .table_sources(&request.run_ids, &request.source_ids)?;
+        self.snapshots.table_catalog(&sources, control)
+    }
+
+    /// Sort and filter complete selected collections before pagination, preserving exact cell numbers.
+    pub fn table_rows(&self, request: &TableRowsRequest) -> Result<TableRowsResponse> {
+        self.table_rows_controlled(request, &TableReadControl::default())
+    }
+
+    /// Read pinned or current structured rows with request-local cooperative cancellation.
+    pub fn table_rows_controlled(
+        &self,
+        request: &TableRowsRequest,
+        control: &TableReadControl,
+    ) -> Result<TableRowsResponse> {
+        control.check()?;
+        snapshot_store::tables::validate_selection(&request.run_ids, &request.source_ids)?;
+        let sources = self
+            .repository
+            .table_sources(&request.run_ids, &request.source_ids)?;
+        self.snapshots.table_rows(request, &sources, control)
+    }
+
     pub fn snapshot_diff(&self, request: &SnapshotDiffRequest) -> Result<SnapshotDiffResponse> {
         self.snapshots.diff(request)
     }
 
-    /// Pull only the versioned snapshot protocol; legacy metric endpoints are never probed.
+    /// Pull the versioned snapshot protocol.
     pub async fn scrape_source(self: &Arc<Self>, source: &Source) -> Result<usize> {
         let engine = self.clone();
         let source_id = source.id.clone();
@@ -644,17 +541,6 @@ impl Engine {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-fn trim_native_heap() {
-    // Rvx is Linux-first; release free pages retained by glibc after compaction.
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
-#[cfg(all(test, not(target_os = "linux")))]
-fn trim_native_heap() {}
-
 #[cfg(test)]
 fn test_directory() -> std::io::Result<tempfile::TempDir> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.build");
@@ -665,56 +551,26 @@ fn test_directory() -> std::io::Result<tempfile::TempDir> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
 
     use crate::test_directory as tempdir;
     use axum::extract::Query;
     use axum::routing::get;
     use axum::{Json, Router};
-    use rvx_core::{
-        MetricBatch, MetricPoint, QueryRequest, RunStatus, SnapshotDescriptor, SourceRegistration,
-        PROTOCOL_VERSION,
-    };
+    use rvx_core::{RunStatus, SnapshotDescriptor, SourceRegistration, PROTOCOL_VERSION};
     use serde::Deserialize;
 
     use super::*;
 
     #[test]
-    fn persists_deduplicates_and_recovers_points() {
+    fn persists_run_lifecycle_without_reopening_finished_runs() {
         let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
+        let untouched = directory.path().join("metrics.wal");
+        std::fs::write(&untouched, b"existing unrelated data").unwrap();
+        let engine = Engine::open(directory.path()).unwrap();
         let project = engine.create_project("project").unwrap();
         let experiment = engine.create_experiment(&project.id, "experiment").unwrap();
         let run = engine.create_run(&experiment.id, "run", "{}").unwrap();
-        let batch = MetricBatch {
-            run_id: run.id.clone(),
-            source_id: "source".into(),
-            source_session_id: "session".into(),
-            oldest_sequence: 1,
-            next_sequence: 3,
-            dropped_before: None,
-            points: (1..3)
-                .map(|sequence| MetricPoint {
-                    source_session_id: "session".into(),
-                    sequence,
-                    event_time_ns: sequence as i64,
-                    ingest_time_ns: 0,
-                    axes: BTreeMap::from([("optimizer_step".into(), sequence as i64)]),
-                    values: BTreeMap::from([("train/loss".into(), sequence as f64)]),
-                })
-                .collect(),
-        };
-        assert_eq!(engine.ingest(batch.clone()).unwrap(), 2);
-        assert_eq!(engine.ingest(batch).unwrap(), 0);
-        let summaries = engine
-            .query_summaries(&SummaryRequest {
-                run_ids: vec![run.id.clone()],
-                metrics: vec!["train/loss".into()],
-                axis: "optimizer_step".into(),
-                from: None,
-                to: None,
-            })
-            .unwrap();
-        assert_eq!(summaries.summaries[0].values["train/loss"], 2.0);
         let running = engine
             .update_run_status(&run.id, &RunStatus::Running)
             .unwrap();
@@ -728,167 +584,21 @@ mod tests {
             .is_err());
         drop(engine);
 
-        let recovered = Engine::open(directory.path(), 100).unwrap();
-        let response = recovered
-            .query(&QueryRequest {
-                run_id: run.id.clone(),
-                source_ids: Vec::new(),
-                metrics: vec!["train/loss".into()],
-                axis: "optimizer_step".into(),
-                from: None,
-                to: None,
-                max_points: 100,
-            })
-            .unwrap();
-
-        assert_eq!(response.series[0].values, vec![1.0, 2.0]);
-        assert_eq!(recovered.stats().unwrap().hot_points, 2);
-    }
-
-    #[test]
-    fn compacts_wal_to_parquet_and_queries_after_restart() {
-        let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
-        let project = engine.create_project("project").unwrap();
-        let experiment = engine.create_experiment(&project.id, "experiment").unwrap();
-        let run = engine.create_run(&experiment.id, "run", "{}").unwrap();
-        engine
-            .ingest(MetricBatch {
-                run_id: run.id.clone(),
-                source_id: "source".into(),
-                source_session_id: "session".into(),
-                oldest_sequence: 1,
-                next_sequence: 4,
-                dropped_before: None,
-                points: (1..4)
-                    .map(|sequence| MetricPoint {
-                        source_session_id: "session".into(),
-                        sequence,
-                        event_time_ns: sequence as i64,
-                        ingest_time_ns: 0,
-                        axes: BTreeMap::from([("optimizer_step".into(), sequence as i64)]),
-                        values: BTreeMap::from([("train/loss".into(), sequence as f64)]),
-                    })
-                    .collect(),
-            })
-            .unwrap();
-
-        assert_eq!(engine.compact().unwrap(), 3);
-        assert_eq!(engine.stats().unwrap().parquet_files, 1);
-        drop(engine);
-
-        let recovered = Engine::open(directory.path(), 1).unwrap();
-        let response = recovered
-            .query(&QueryRequest {
-                run_id: run.id.clone(),
-                source_ids: Vec::new(),
-                metrics: vec!["train/loss".into()],
-                axis: "optimizer_step".into(),
-                from: None,
-                to: None,
-                max_points: 100,
-            })
-            .unwrap();
-
-        assert_eq!(response.series[0].values, vec![1.0, 2.0, 3.0]);
-        assert_eq!(recovered.stats().unwrap().hot_points, 0);
-    }
-
-    #[test]
-    fn retains_existing_archive_history_without_scheduling_it() {
-        let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
-        let project = engine.create_project("hostmon").unwrap();
-        let experiment = engine.create_experiment(&project.id, "host").unwrap();
-        let run = engine.create_run(&experiment.id, "host", "{}").unwrap();
-        let source = engine
-            .repository
-            .register_source(&Source {
-                id: "legacy-source".into(),
-                run_id: run.id.clone(),
-                attempt_id: "legacy-import".into(),
-                role: "hostmon".into(),
-                endpoint: "archive://hostmon-history".into(),
-                node_id: Some("node-a".into()),
-                rank: None,
-                state: SourceState::Ended,
-                source_session_id: Some("hostmon-history-v1".into()),
-                last_success_at_ns: None,
-                last_error: None,
-                scrape_interval_ms: 60_000,
-                timeout_ms: 1_000,
-                descriptor: None,
-            })
-            .unwrap();
-        engine
-            .ingest(MetricBatch {
-                run_id: run.id.clone(),
-                source_id: source.id.clone(),
-                source_session_id: "hostmon-history-v1".into(),
-                oldest_sequence: 0,
-                next_sequence: 2,
-                dropped_before: None,
-                points: (0..2)
-                    .map(|sequence| MetricPoint {
-                        source_session_id: "hostmon-history-v1".into(),
-                        sequence,
-                        event_time_ns: (sequence as i64 + 1) * 1_000_000_000,
-                        ingest_time_ns: 0,
-                        axes: BTreeMap::from([("hostmon_sample".into(), sequence as i64)]),
-                        values: BTreeMap::from([(
-                            "cpu/percent".into(),
-                            10.0 + sequence as f64 * 20.0,
-                        )]),
-                    })
-                    .collect(),
-            })
-            .unwrap();
-        drop(engine);
-
-        let engine = Engine::open(directory.path(), 100).unwrap();
-        assert_eq!(engine.stats().unwrap().hot_points, 2);
-        assert_eq!(engine.compact().unwrap(), 2);
-        drop(engine);
-
-        let engine = Engine::open(directory.path(), 100).unwrap();
-        let response = engine
-            .query(&QueryRequest {
-                run_id: run.id,
-                source_ids: vec![source.id.clone()],
-                metrics: vec!["cpu/percent".into()],
-                axis: "wall_time".into(),
-                from: None,
-                to: None,
-                max_points: 100,
-            })
-            .unwrap();
-
-        assert_eq!(response.series[0].values, vec![10.0, 30.0]);
+        let recovered = Engine::open(directory.path()).unwrap();
         assert_eq!(
-            response.series[0].event_time_ns,
-            vec![1_000_000_000, 2_000_000_000]
+            recovered.list_runs(None).unwrap()[0].status,
+            RunStatus::Finished
         );
-        assert_eq!(engine.list_sources(None).unwrap(), vec![source.clone()]);
         assert_eq!(
-            engine
-                .repository
-                .cursor(&source.id, "hostmon-history-v1")
-                .unwrap(),
-            Some(2)
+            std::fs::read(untouched).unwrap(),
+            b"existing unrelated data"
         );
-        let mut sources = HashMap::new();
-        let mut schedule = BinaryHeap::new();
-        let mut scheduled = HashSet::new();
-        engine.refresh_schedule(&mut sources, &mut schedule, &mut scheduled);
-        assert!(sources.is_empty());
-        assert!(schedule.is_empty());
-        assert!(scheduled.is_empty());
     }
 
     #[test]
     fn registers_only_http_pull_base_urls() {
         let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
+        let engine = Engine::open(directory.path()).unwrap();
         let project = engine.create_project("project").unwrap();
         let experiment = engine.create_experiment(&project.id, "experiment").unwrap();
         let run = engine.create_run(&experiment.id, "run", "{}").unwrap();
@@ -973,7 +683,7 @@ mod tests {
         }
 
         let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
+        let engine = Engine::open(directory.path()).unwrap();
         let project = engine.create_project("project").unwrap();
         let experiment = engine.create_experiment(&project.id, "experiment").unwrap();
         let run = engine.create_run(&experiment.id, "run", "{}").unwrap();
@@ -1024,7 +734,7 @@ mod tests {
 
         assert_eq!(response.series[0].values, vec![Some(0.25)]);
         assert_eq!(engine.stats().unwrap().snapshots, 1);
-        assert_eq!(engine.stats().unwrap().ingested_points, 0);
+        assert_eq!(engine.stats().unwrap().snapshots, 1);
         let persisted_run = engine.list_runs(None).unwrap().remove(0);
         assert_eq!(persisted_run.status, RunStatus::Running);
         assert!(persisted_run.updated_at_ns > persisted_run.created_at_ns);
@@ -1115,7 +825,7 @@ mod tests {
         }
 
         let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
+        let engine = Engine::open(directory.path()).unwrap();
         let project = engine.create_project("p").unwrap();
         let experiment = engine.create_experiment(&project.id, "e").unwrap();
         let run = engine.create_run(&experiment.id, "r", "{}").unwrap();
@@ -1201,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn coordinator_drains_short_pages_without_waiting_between_backlog_pages() {
         let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
+        let engine = Engine::open(directory.path()).unwrap();
         let project = engine.create_project("p").unwrap();
         let experiment = engine.create_experiment(&project.id, "e").unwrap();
         let run = engine.create_run(&experiment.id, "r", "{}").unwrap();
@@ -1285,7 +995,7 @@ mod tests {
     #[tokio::test]
     async fn coordinator_shutdown_cancels_blocked_http_and_releases_source_ownership() {
         let directory = tempdir().unwrap();
-        let engine = Engine::open(directory.path(), 100).unwrap();
+        let engine = Engine::open(directory.path()).unwrap();
         let project = engine.create_project("p").unwrap();
         let experiment = engine.create_experiment(&project.id, "e").unwrap();
         let run = engine.create_run(&experiment.id, "r", "{}").unwrap();

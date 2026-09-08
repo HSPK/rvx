@@ -1,0 +1,76 @@
+.chart-grid {gap: 12px;}
+.chart-card {padding: 8px 8px 2px; border: 0; border-radius: 7px; box-shadow: none;}
+.chart-header {display: grid; grid-template-columns: var(--panel-action-width, 30px) minmax(0, 1fr) var(--panel-action-width, 30px); gap: 0 6px; min-height: 30px; align-items: center;}
+.metric-heading {grid-area: 1 / 2; justify-self: center; justify-content: center; flex-wrap: wrap; max-width: 100%; gap: 0 6px; align-items: baseline; padding-top: 0; text-align: center;}
+.metric-heading h2 {font-size: 13px; line-height: 20px; white-space: normal; overflow: visible; min-width: 0;}
+.metric-unit {font-size: 11px; line-height: 20px;}
+.metric-unit:empty {display: none;}
+.panel-drag-handle {display: block; max-width: 100%; border: 0; border-radius: 5px; padding: 6px 8px; min-height: 32px; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-align: center; overflow-wrap: anywhere; cursor: grab; touch-action: none;}
+.metric-heading .metric-unit:not(:empty) {margin-left: 6px; white-space: nowrap;}
+.panel-drag-handle:hover:not(:disabled), .panel-drag-handle:focus-visible {color: var(--accent); background: var(--hover); box-shadow: none;}
+.panel-drag-handle:active, .panel-drag-handle[aria-pressed="true"] {cursor: grabbing;}
+.panel-drag-handle:disabled {opacity: 1; color: inherit; cursor: default;}
+.panel-actions {grid-area: 1 / 3; justify-self: end; align-self: start; gap: 0;}
+.panel-indicators {grid-row: 2; grid-column: 1 / -1; display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 2px 8px; min-width: 0;}
+.panel-indicators:not(:has(> :not([hidden]))) {display: none;}
+.panel-preview {grid-template-columns: 0 minmax(0, 1fr) 0; column-gap: 0;}
+.panel-indicators .chart-status {margin: 0; font-size: 11px; white-space: normal; text-align: center;}
+.chart-legend {min-height: 0; gap: 3px 12px; margin: 1px 0 4px; max-height: 60px;}
+.legend-item {font-size: 11px; line-height: 17px; gap: 5px;}
+.chart-host {--chart-base-height: 244px; height: calc(var(--chart-base-height) + var(--chart-axis-extra, 0px));}
+.chart-empty {inset: 52px 16px 28px;}
+.chart-zoom-state {align-self: center; color: var(--muted); font-size: 10px; line-height: 16px; white-space: nowrap;}
+.chart-feedback {display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.4; padding: 5px 2px; color: var(--error); overflow-wrap: anywhere;}
+.chart-feedback > span {min-width: 0; flex: 1;}
+.chart-feedback > button {flex: none;}
+.chart-failed .chart-host {opacity: .6;}
+.chart-card:focus, .chart-card:focus-visible, .chart-host:focus, .chart-host:focus-visible, .chart-scroll:focus, .chart-scroll:focus-visible, .table-scroll:focus, .table-scroll:focus-visible {outline: none; box-shadow: none;}
+.chart-card:has(.chart-host:focus-visible) .panel-drag-handle, .chart-card:has(.table-scroll:focus-visible) .panel-drag-handle {color: var(--accent); background: var(--hover); box-shadow: none;}
+.chart-card .panel-drag-handle:focus-visible {outline: none;}
+.chart-card .menu-trigger:focus-visible {outline: none; background: var(--hover); box-shadow: none;}
+.chart-tooltip {position: fixed; inset: 0 auto auto 0; margin: 0; width: max-content; max-width: min(380px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow: auto; padding: 7px; border: 0; border-radius: 5px; color: var(--text); background: var(--surface); box-shadow: 0 4px 24px #0003, 0 0 0 1px var(--line); pointer-events: none; font-size: 11px; line-height: 1.35;}
+.chart-tooltip-header {display: flex; justify-content: space-between; gap: 10px; padding: 1px 5px 4px;}
+.chart-tooltip-heading {color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;}
+.chart-tooltip-count {color: var(--muted); font-size: 10px; white-space: nowrap; align-self: center;}
+.chart-tooltip-row {display: grid; grid-template-columns: 13px minmax(0, 1fr) auto; align-items: center; gap: 1px 6px; padding: 5px; border-radius: 3px;}
+.chart-tooltip-row + .chart-tooltip-row {margin-top: 2px;}
+.chart-tooltip-row.is-selected {background: var(--hover); box-shadow: inset 2px 0 var(--run-color);}
+.chart-tooltip-label {min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;}
+.chart-tooltip-value {font-variant-numeric: tabular-nums; font-weight: 600; padding-left: 6px; overflow-wrap: anywhere;}
+.chart-tooltip-time {grid-column: 2 / -1; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;}
+.chart-tooltip-time:empty {display: none;}
+.chart-preview .chart-card {padding: 0;}
+.chart-preview .chart-header {margin-bottom: 2px;}
+.chart-preview .chart-card:has(.chart-host:focus-visible) .metric-heading h2 {color: var(--accent); box-shadow: none;}
+.chart-preview .chart-host {--chart-base-height: clamp(160px, 24dvh, 230px); height: calc(var(--chart-base-height) + var(--chart-axis-extra, 0px));}
+.chart-preview .chart-legend {min-height: 0; margin-bottom: 3px;}
+.panel-fullscreen > .dialog-body {padding: 8px;}
+.is-expanded > .panel-header {--panel-action-width: 72px; padding-inline: 0;}
+.is-expanded > .panel-header > .panel-actions {justify-self: start;}
+.is-expanded .chart-host {height: auto; flex: 1;}
+.is-expanded .chart-legend {flex: none;}
+.is-expanded .chart-feedback {flex: none;}
+.chart-card.table-card {padding: 8px 12px;}
+.table-card > .panel-header {min-height: 36px; margin-bottom: 4px;}
+.chart-card .table-scope {padding-block: 2px;}
+.chart-card .table-tools {padding: 4px 0 8px; gap: 6px;}
+.table-card .table-footer {padding-top: 6px;}
+.table-preview.table-card {padding-inline: 4px;}
+.is-dragging .panel-drag-handle {background: var(--hover);}
+.drop-before::before {top: -5px;}
+.drop-after::after {bottom: -5px;}
+@media (max-width: 679px) {
+  .chart-card {padding: 6px 6px 2px;}
+  .chart-card.table-card {padding: 6px 8px 8px;}
+  .chart-card .table-tools {gap: 4px;}
+  .chart-grid {gap: 10px;}
+  .metric-heading h2 {font-size: 13px;}
+  .panel-drag-handle {min-height: 26px;}
+  .chart-header {--panel-action-width: 36px; min-height: 36px;}
+  .chart-host {--chart-base-height: 236px;}
+  .chart-card .menu-trigger {width: 36px; min-width: 36px; height: 36px; padding: 9px;}
+  .chart-tooltip {max-width: calc(100vw - 16px);}
+  .chart-preview .chart-host {--chart-base-height: 160px;}
+  .panel-fullscreen > .dialog-body {padding: 4px;}
+  .is-expanded .chart-host {height: auto;}
+}

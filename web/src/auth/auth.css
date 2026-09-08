@@ -1,0 +1,43 @@
+.auth-page, .auth-lock {
+  --auth-bg: #f6f7f9; --auth-surface: #fff; --auth-text: #252c38; --auth-muted: #667181;
+  --auth-line: #dce2ea; --auth-accent: #4263d6; --auth-error: #b54b40;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--auth-text); background: var(--auth-bg); color-scheme: light;
+}
+.auth-page {min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 32px 20px; box-sizing: border-box;}
+.auth-card {width: min(360px, 100%); box-sizing: border-box;}
+.auth-card * {box-sizing: border-box;}
+.auth-card .brand {display: inline-flex; gap: 7px; align-items: center; margin-bottom: 32px; color: var(--auth-text);}
+.auth-card .brand-icon {display: block; width: 28px; height: 28px;}
+.auth-card .brand-wordmark {display: block; width: 38px; height: 19px;}
+.auth-page > .brand {display: inline-flex; align-items: center; gap: 7px;}
+.auth-page > .brand .brand-icon {width: 28px; height: 28px;}
+.auth-page > .brand .brand-wordmark {width: 38px; height: 19px;}
+.auth-title {font-size: 26px; line-height: 1.25; letter-spacing: -.6px; font-weight: 600; margin: 0 0 10px;}
+.auth-description {font-size: 14px; line-height: 1.55; color: var(--auth-muted); margin: 0 0 28px;}
+.auth-form {display: flex; flex-direction: column; gap: 10px;}
+.auth-label {font-size: 13px; font-weight: 500; line-height: 20px;}
+.auth-password {position: relative; display: flex; align-items: center;}
+.auth-input {display: block; width: 100%; height: 46px; padding: 10px 48px 10px 12px; border: 1px solid var(--auth-line); border-radius: 6px; background: var(--auth-surface); color: var(--auth-text); font: inherit; outline: none;}
+.auth-input:focus {border-color: var(--auth-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--auth-accent) 12%, transparent);}
+.auth-input[aria-invalid="true"] {border-color: var(--auth-error);}
+.auth-visibility {position: absolute; right: 3px; display: grid; place-items: center; width: 40px; height: 40px; padding: 10px; border: 0; border-radius: 4px; color: var(--auth-muted); background: transparent; cursor: pointer;}
+.auth-visibility svg {width: 18px; height: 18px;}
+.auth-visibility:hover, .auth-visibility:focus-visible {background: color-mix(in srgb, var(--auth-accent) 8%, var(--auth-surface)); outline: none;}
+.auth-submit {display: flex; align-items: center; justify-content: center; width: 100%; min-height: 44px; margin-top: 8px; padding: 10px 16px; border: 0; border-radius: 6px; color: #fff; background: #4263d6; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;}
+.auth-submit:hover:not(:disabled), .auth-submit:focus-visible {background: #3655c3; outline: 2px solid color-mix(in srgb, var(--auth-accent) 30%, transparent); outline-offset: 2px;}
+.auth-submit:disabled {opacity: .65; cursor: wait;}
+.auth-error {color: var(--auth-error); font-size: 13px; line-height: 1.5; margin: 2px 0 0; overflow-wrap: anywhere;}
+.auth-error[hidden] {display: none;}
+.auth-lock {position: fixed; inset: 0; max-width: none; max-height: none; width: 100vw; height: 100dvh; margin: 0; padding: 32px 20px; border: 0; overflow: auto;}
+.auth-lock[open] {display: grid; place-items: center;}
+.auth-lock::backdrop {background: var(--auth-bg);}
+.auth-bootstrap {font-size: 14px; color: var(--auth-muted);}
+:root[data-theme="dark"] .auth-lock, :root[data-theme="dark"] .auth-page {
+  --auth-bg: #171b23; --auth-surface: #1e242e; --auth-text: #e0e5ee; --auth-muted: #9aa5b5;
+  --auth-line: #404b5d; --auth-accent: #8198f1; --auth-error: #f19184; color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .auth-page {--auth-bg: #171b23; --auth-surface: #1e242e; --auth-text: #e0e5ee; --auth-muted: #9aa5b5; --auth-line: #404b5d; --auth-accent: #8198f1; --auth-error: #f19184; color-scheme: dark;}
+}
+@media (max-height: 500px) {.auth-page, .auth-lock {padding-block: 20px;} .auth-card .brand {margin-bottom: 16px;} .auth-description {margin-bottom: 16px;}}
