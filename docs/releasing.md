@@ -14,7 +14,7 @@ One mixed wheel contains:
 - Built `rvx/_web/index.html` and its assets.
 
 Users need neither Rust nor Node to run `rvx serve --data-dir PATH`.
-The first release supports Linux x86_64/arm64 and macOS x86_64/arm64.
+The release matrix supports Linux x86_64/arm64 and macOS x86_64/arm64.
 Linux targets glibc 2.28+, macOS targets 11+. Windows, musl, and source-only
 PyPI installations are not part of this release matrix.
 
@@ -61,8 +61,9 @@ tag is selected as its ref.
 
 1. Update `project.version` in `pyproject.toml` and `workspace.package.version`
    in `Cargo.toml` to the same stable `MAJOR.MINOR.PATCH` value; refresh locks.
-2. Complete CI and a manual Release build.
-3. Commit the release changes and push an exact matching tag, e.g. `v0.1.0`.
+2. Commit and push the preparation, then complete CI and a manual Release build
+   on that exact commit.
+3. Push an exact matching tag on the verified release commit, e.g. `v0.2.0`.
 
 Only a pushed `v*` tag can reach the PyPI job. A tag that differs from the
 package version fails before building. Every platform must succeed before
@@ -82,7 +83,7 @@ npm --prefix web run build
 cargo build --locked --release -p rvx-server
 python scripts/package_assets.py --binary target/release/rvxd --ui web/dist
 uv run maturin build --release --locked --out dist
-python scripts/check_wheel.py --version 0.1.0 dist/*.whl
+python scripts/check_wheel.py --version 0.2.0 dist/*.whl
 ```
 
 Local Linux wheels built outside manylinux are useful for local smoke tests,

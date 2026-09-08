@@ -45,8 +45,10 @@ uv tool install rvx
 rvx serve --data-dir /absolute/path/to/rvx-data
 ```
 
-The published `0.1.0` release predates the charts-first redesign. Build from
-source for the current development interface; existing releases are immutable.
+Version `0.2.0` includes the charts-first workspace, browser sign-in, and snapshot
+Bar/Status views. The older `0.1.0` release predates this redesign; published
+releases are immutable. Back up persistent storage before upgrading this
+Pre-alpha application.
 
 To use the SDK inside an ML project's environment instead, run `uv add rvx`
 and import `Source` from `rvx`.
