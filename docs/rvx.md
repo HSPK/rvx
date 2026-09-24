@@ -56,7 +56,7 @@ role's application state
         |
   chart catalog / numeric projection / exact observation / history / diff
         |
-  Rust HTTP API -> TypeScript workspace / Python CLI
+  Rust HTTP API -> TypeScript workspace / Rust CLI and TUI
 ```
 
 The producer owns capture validation, its Session, version assignment,
@@ -87,17 +87,21 @@ compatibility APIs are removed; archived scalar files are not loaded.
 | Path | Responsibility |
 | --- | --- |
 | `rust/rvx-core` | Identity, shared snapshot contracts, validation, lifecycle types |
+| `rust/rvx-config` | Versioned TOML schema shared by the CLI and daemon |
 | `rust/rvx-snapshots` | Full-state producer buffer and HTTP Pull handlers |
+| `rust/rvx-tracker` | Step/commit tracking, summary, alerts, spans and artifact lineage |
 | `rust/rvx-engine` | Registry, scheduler, durable snapshot store and read operations |
 | `rust/rvx-server` | Authenticated control/read APIs, static UI, process lifetime |
+| `rust/rvx-cli` | Native control client, daemon launcher, TOML dashboard client and ratatui |
 | `rust/rvx-python` | Coarse PyO3 bindings and native producer runtime |
-| `src/rvx` | Python SDK, control service, HTTP client CLI |
+| `src/rvx` | Python SDK facade plus ASGI/aiohttp adapters |
 | `web/src/app` | Multi-run charts/tables, Run details, server workspace preferences and connection state |
 
 Read [the shared contract](snapshots.md) first, then the engine/store, producer,
-and API/UI consumers. Python is not on the standalone server's scrape or HTTP
-request path. Python application calls still pay validation/encoding and FFI
-costs; native HTTP does not mean Python capture is free.
+the [native tracker contract](tracker.md), and API/UI consumers. Python is not on the standalone server, control CLI, TUI,
+scrape, or HTTP request path. Python application calls still pay SDK
+validation/encoding and FFI costs; native HTTP does not mean Python capture is
+free.
 
 ## HTTP protocol and read APIs
 
@@ -243,11 +247,14 @@ For source development, use:
 
 ```bash
 uv sync --locked
-cargo build --locked --release -p rvx-server
 npm --prefix web ci
 npm --prefix web run build
-uv run python scripts/package_assets.py --binary target/release/rvxd --ui web/dist
-./target/release/rvxd --data-dir /absolute/path/to/rvx-data \
+cargo build --locked --release -p rvx-server -p rvx-cli
+python scripts/package_assets.py \
+  --cli-binary target/release/rvx \
+  --daemon-binary target/release/rvxd \
+  --ui web/dist
+./target/release/rvx serve --data-dir /absolute/path/to/rvx-data \
   --listen 127.0.0.1:9110 --ui-dir web/dist
 ```
 
@@ -304,6 +311,12 @@ rvx snapshots latest --run RUN_ID
 rvx snapshots history --run RUN_ID
 rvx query --run RUN_ID --field /progress/loss
 ```
+
+For training jobs with known producer endpoints, `rvx daemon --config rvx.toml`
+can idempotently create the hierarchy and register Sources before native
+scraping starts. The same strict TOML document configures `rvx tui`, which
+automatically follows the newest running Run in its Project/Experiment scope
+and reads the same HTTP APIs as the Web UI. See [the daemon/TUI guide](tui.md).
 
 `RVX_URL` or `--url` overrides the default `http://127.0.0.1:9110`.
 See [the Source SDK guide](source.md) for standalone serving, ASGI/aiohttp

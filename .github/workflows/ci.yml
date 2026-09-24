@@ -26,11 +26,12 @@ jobs:
           python-version: "3.11"
       - run: cargo test --locked --workspace
       - run: uv sync --locked
-      - run: cargo build --locked --release -p rvx-server
+      - run: cargo build --locked --release -p rvx-server -p rvx-cli
       - run: uv run python -m unittest discover -s tests -v
         env:
           RVXD_BINARY: ${{ github.workspace }}/target/release/rvxd
-      - run: uv run rvx --help
+          RVX_BINARY: ${{ github.workspace }}/target/release/rvx
+      - run: target/release/rvx --help
       - run: uv run python scripts/release_version.py
 
   frontend:

@@ -6,11 +6,17 @@ use rvx_core::{new_id, now_ns, Experiment, Project, Run, RunStatus, Source, Sour
 
 use crate::{EngineError, Result};
 
-mod ui;
 mod auth;
+mod ui;
 
 pub struct Repository {
     connection: Mutex<Connection>,
+}
+
+pub(crate) struct ScopedSource {
+    pub source: Source,
+    pub project: String,
+    pub experiment: String,
 }
 
 impl Repository {
@@ -176,6 +182,155 @@ impl Repository {
                 run.updated_at_ns
             ],
         )?;
+        Ok(run)
+    }
+
+    pub fn ensure_configured_run(
+        &self,
+        run_id: &str,
+        project_name: &str,
+        experiment_name: &str,
+        run_name: &str,
+        config_json: &str,
+    ) -> Result<Run> {
+        for (field, value) in [
+            ("run id", run_id),
+            ("project name", project_name),
+            ("experiment name", experiment_name),
+            ("run name", run_name),
+        ] {
+            rvx_core::validate_name(field, value)?;
+            if value.len() > 4096 {
+                return Err(EngineError::InvalidInput(format!(
+                    "{field} exceeds 4096 bytes"
+                )));
+            }
+        }
+        let config: serde_json::Value = serde_json::from_str(config_json)
+            .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+        if !config.is_object() {
+            return Err(EngineError::InvalidInput(
+                "configured Run config must be a JSON object".into(),
+            ));
+        }
+        let run_name = run_name.trim();
+        let project_name = project_name.trim();
+        let experiment_name = experiment_name.trim();
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+
+        let project = transaction
+            .query_row(
+                "SELECT id, name, created_at_ns FROM projects WHERE name=?1",
+                [project_name],
+                |row| {
+                    Ok(Project {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_at_ns: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_else(|| Project {
+                id: new_id("project"),
+                name: project_name.to_string(),
+                created_at_ns: now_ns(),
+            });
+        transaction.execute(
+            "INSERT OR IGNORE INTO projects(id, name, created_at_ns) VALUES (?1, ?2, ?3)",
+            params![project.id, project.name, project.created_at_ns],
+        )?;
+        let project_id: String = transaction.query_row(
+            "SELECT id FROM projects WHERE name=?1",
+            [project_name],
+            |row| row.get(0),
+        )?;
+
+        let experiment = transaction
+            .query_row(
+                "SELECT id, project_id, name, created_at_ns
+                 FROM experiments WHERE project_id=?1 AND name=?2",
+                params![project_id, experiment_name],
+                |row| {
+                    Ok(Experiment {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        name: row.get(2)?,
+                        created_at_ns: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_else(|| Experiment {
+                id: new_id("experiment"),
+                project_id: project_id.clone(),
+                name: experiment_name.to_string(),
+                created_at_ns: now_ns(),
+            });
+        transaction.execute(
+            "INSERT OR IGNORE INTO experiments(id, project_id, name, created_at_ns)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                experiment.id,
+                experiment.project_id,
+                experiment.name,
+                experiment.created_at_ns
+            ],
+        )?;
+        let experiment_id: String = transaction.query_row(
+            "SELECT id FROM experiments WHERE project_id=?1 AND name=?2",
+            params![project_id, experiment_name],
+            |row| row.get(0),
+        )?;
+
+        let existing = transaction
+            .query_row(
+                "SELECT id, experiment_id, name, status, config_json,
+                        created_at_ns, updated_at_ns
+                 FROM runs WHERE id=?1",
+                [run_id],
+                run_from_row,
+            )
+            .optional()?;
+        let run = if let Some(run) = existing {
+            let stored_config: serde_json::Value = serde_json::from_str(&run.config_json)?;
+            if run.experiment_id != experiment_id || run.name != run_name || stored_config != config
+            {
+                return Err(EngineError::InvalidInput(format!(
+                    "configured Run {run_id:?} conflicts with persisted identity or config"
+                )));
+            }
+            run
+        } else {
+            let now = now_ns();
+            let run = Run {
+                id: run_id.to_string(),
+                experiment_id,
+                name: run_name.to_string(),
+                status: RunStatus::Created,
+                config_json: serde_json::to_string(&config)?,
+                created_at_ns: now,
+                updated_at_ns: now,
+            };
+            transaction.execute(
+                "INSERT INTO runs(
+                    id, experiment_id, name, status, config_json,
+                    created_at_ns, updated_at_ns
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    run.id,
+                    run.experiment_id,
+                    run.name,
+                    status_text(&run.status),
+                    run.config_json,
+                    run.created_at_ns,
+                    run.updated_at_ns
+                ],
+            )?;
+            run
+        };
+        transaction.commit()?;
         Ok(run)
     }
 
@@ -345,18 +500,30 @@ impl Repository {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub fn source_by_id(&self, source_id: &str) -> Result<Source> {
+    pub fn source_by_id(&self, source_id: &str) -> Result<ScopedSource> {
         self.connection
             .lock()
             .query_row(
-                "SELECT id, run_id, attempt_id, role, endpoint, node_id, rank, state,
-                    source_session_id, last_success_at_ns, last_error,
-                    scrape_interval_ms, timeout_ms,
+                "SELECT sources.id, sources.run_id, sources.attempt_id, sources.role,
+                    sources.endpoint, sources.node_id, sources.rank, sources.state,
+                    sources.source_session_id, sources.last_success_at_ns, sources.last_error,
+                    sources.scrape_interval_ms, sources.timeout_ms,
                     (SELECT descriptor_json FROM source_descriptors
-                     WHERE source_id=sources.id)
-             FROM sources WHERE id=?1",
+                     WHERE source_id=sources.id),
+                    projects.name, experiments.name
+             FROM sources
+             JOIN runs ON runs.id=sources.run_id
+             JOIN experiments ON experiments.id=runs.experiment_id
+             JOIN projects ON projects.id=experiments.project_id
+             WHERE sources.id=?1",
                 [source_id],
-                source_from_row,
+                |row| {
+                    Ok(ScopedSource {
+                        source: source_from_row(row)?,
+                        project: row.get(14)?,
+                        experiment: row.get(15)?,
+                    })
+                },
             )
             .optional()?
             .ok_or_else(|| EngineError::InvalidInput(format!("unknown source: {source_id}")))

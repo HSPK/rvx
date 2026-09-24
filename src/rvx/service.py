@@ -108,44 +108,14 @@ class RvxService:
         config: dict[str, Any],
     ) -> dict[str, dict[str, Any]]:
         """Idempotently create a Project, Experiment, and Run hierarchy."""
-        project = next(
-            (
-                item
-                for item in self.projects()
-                if item.get("name") == project_name
-            ),
-            None,
-        )
-        if project is None:
-            project = self.create_project(project_name)
-        experiment = next(
-            (
-                item
-                for item in self.experiments(project["id"])
-                if item.get("name") == experiment_name
-            ),
-            None,
-        )
-        if experiment is None:
-            experiment = self.create_experiment(
-                project["id"],
+        return self._decode(
+            self._require().ensure_hierarchy(
+                project_name,
                 experiment_name,
+                run_name,
+                json.dumps(config, ensure_ascii=False, separators=(",", ":")),
             )
-        run = next(
-            (
-                item
-                for item in self.runs(experiment["id"])
-                if item.get("name") == run_name
-            ),
-            None,
         )
-        if run is None:
-            run = self.create_run(experiment["id"], run_name, config)
-        return {
-            "project": project,
-            "experiment": experiment,
-            "run": run,
-        }
 
     def sources(self, run_id: str | None = None) -> list[dict[str, Any]]:
         """List snapshot Sources, optionally restricted to one Run."""

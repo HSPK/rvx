@@ -8,19 +8,21 @@ the repository or workflow.
 
 One mixed wheel contains:
 
-- `rvx` Python SDK and CLI, including `Source`.
+- `rvx` Python SDK, including `Source`, the native tracker adapter, and
+  ASGI/aiohttp integration.
 - Internal `rvx._native` abi3 extension for Python 3.11+.
-- Executable `rvx/_bin/rvxd`.
-- Built `rvx/_web/index.html` and its assets.
+- Native `rvx` control/TUI executable and `rvxd` daemon executable installed
+  directly into the environment's scripts directory.
+- Built Web UI installed under the environment's shared `share/rvx/web` data.
 
 Users need neither Rust nor Node to run `rvx serve --data-dir PATH`.
 The release matrix supports Linux x86_64/arm64 and macOS x86_64/arm64.
 Linux targets glibc 2.28+, macOS targets 11+. Windows, musl, and source-only
 PyPI installations are not part of this release matrix.
 
-Both the Linux executable and extension are built inside the same manylinux
+Both Linux executables and the extension are built inside the same manylinux
 container. Auditing only the extension can incorrectly label a wheel whose
-bundled executable requires a newer glibc; the release check audits both.
+bundled executables require a newer glibc; the release check audits all three.
 macOS builds use matching native runners and an explicit deployment target.
 
 ## One-time PyPI setup
@@ -63,7 +65,7 @@ tag is selected as its ref.
    in `Cargo.toml` to the same stable `MAJOR.MINOR.PATCH` value; refresh locks.
 2. Commit and push the preparation, then complete CI and a manual Release build
    on that exact commit.
-3. Push an exact matching tag on the verified release commit, e.g. `v0.2.0`.
+3. Push an exact matching tag on the verified release commit, e.g. `v0.3.0`.
 
 Only a pushed `v*` tag can reach the PyPI job. A tag that differs from the
 package version fails before building. Every platform must succeed before
@@ -75,15 +77,19 @@ do not overwrite a PyPI release or bypass the complete-wheel checks.
 
 ## Local preparation
 
-Build `web/dist` and a release `rvxd`, then stage them before building a wheel:
+Build `web/dist` and both release executables, then stage them before building
+a wheel:
 
 ```bash
 npm --prefix web ci
 npm --prefix web run build
-cargo build --locked --release -p rvx-server
-python scripts/package_assets.py --binary target/release/rvxd --ui web/dist
+cargo build --locked --release -p rvx-server -p rvx-cli
+python scripts/package_assets.py \
+  --cli-binary target/release/rvx \
+  --daemon-binary target/release/rvxd \
+  --ui web/dist
 uv run maturin build --release --locked --out dist
-python scripts/check_wheel.py --version 0.2.0 dist/*.whl
+python scripts/check_wheel.py --version 0.3.0 dist/*.whl
 ```
 
 Local Linux wheels built outside manylinux are useful for local smoke tests,

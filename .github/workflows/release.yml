@@ -99,9 +99,11 @@ jobs:
           container: ${{ matrix.container }}
           args: --release --locked --out dist --interpreter python3.11
           before-script-linux: |
-            cargo build --locked --release --target ${{ matrix.target }} -p rvx-server
+            cargo build --locked --release --target ${{ matrix.target }} -p rvx-server -p rvx-cli
             /opt/python/cp311-cp311/bin/python scripts/package_assets.py \
-              --binary target/${{ matrix.target }}/release/rvxd --ui web/dist
+              --cli-binary target/${{ matrix.target }}/release/rvx \
+              --daemon-binary target/${{ matrix.target }}/release/rvxd \
+              --ui web/dist
       - name: Build macOS executable and stage complete package assets
         if: runner.os == 'macOS'
         env:
@@ -109,8 +111,11 @@ jobs:
         run: |
           rustup toolchain install 1.98.1 --profile minimal
           rustup target add --toolchain 1.98.1 "$RUST_TARGET"
-          cargo build --locked --release --target "$RUST_TARGET" -p rvx-server
-          python scripts/package_assets.py --binary "target/$RUST_TARGET/release/rvxd" --ui web/dist
+          cargo build --locked --release --target "$RUST_TARGET" -p rvx-server -p rvx-cli
+          python scripts/package_assets.py \
+            --cli-binary "target/$RUST_TARGET/release/rvx" \
+            --daemon-binary "target/$RUST_TARGET/release/rvxd" \
+            --ui web/dist
       - name: Build macOS mixed wheel
         if: runner.os == 'macOS'
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380 # v1.49.4

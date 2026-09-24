@@ -1,4 +1,4 @@
-"""Stage native and built UI resources for the single mixed RVX wheel."""
+"""Stage native executables and built UI into the wheel data schemes."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import shutil
 from typing import Sequence
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "rvx"
+WHEEL_DATA_ROOT = Path(__file__).resolve().parents[1] / "rvx.data"
 NATIVE_MAGICS = {
     b"\x7fELF",
     b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
@@ -18,14 +18,27 @@ NATIVE_MAGICS = {
 }
 
 
-def stage_assets(binary: Path, ui: Path) -> tuple[Path, Path]:
-    """Validate both inputs before replacing only the two generated asset locations."""
-    binary, ui = Path(binary).absolute(), Path(ui).absolute()
+def _native(binary: Path, flag: str) -> Path:
+    binary = Path(binary).absolute()
     if binary.is_symlink() or not binary.is_file():
-        raise ValueError(f"--binary must be a regular native rvxd executable: {binary}")
+        raise ValueError(f"{flag} must be a regular native executable: {binary}")
     with binary.open("rb") as stream:
         if stream.read(4) not in NATIVE_MAGICS:
-            raise ValueError(f"--binary must be an ELF or Mach-O native executable: {binary}")
+            raise ValueError(f"{flag} must be an ELF or Mach-O native executable: {binary}")
+    return binary
+
+
+def stage_assets(
+    cli_binary: Path,
+    daemon_binary: Path,
+    ui: Path,
+) -> tuple[Path, Path, Path]:
+    """Validate every input before replacing generated wheel script/data locations."""
+    cli_binary = _native(cli_binary, "--cli-binary")
+    daemon_binary = _native(daemon_binary, "--daemon-binary")
+    if cli_binary.resolve() == daemon_binary.resolve():
+        raise ValueError("CLI and daemon binaries must be distinct files")
+    ui = Path(ui).absolute()
     if ui.is_symlink() or not ui.is_dir():
         raise ValueError(f"--ui must be a built UI directory: {ui}")
     entries = list(ui.rglob("*"))
@@ -40,25 +53,29 @@ def stage_assets(binary: Path, ui: Path) -> tuple[Path, Path]:
     if not any(path.is_file() and path.stat().st_size for path in (ui / "login" / "assets").rglob("*")):
         raise ValueError("--ui must contain nonempty built login assets")
 
-    package = PACKAGE_ROOT.absolute()
-    binary_dir, ui_target = package / "_bin", package / "_web"
-    binary_target = binary_dir / "rvxd"
-    for destination in (package, binary_dir, ui_target):
+    root = WHEEL_DATA_ROOT.absolute()
+    scripts = root / "scripts"
+    data = root / "data"
+    ui_target = data / "share" / "rvx" / "web"
+    cli_target, daemon_target = scripts / "rvx", scripts / "rvxd"
+    for destination in (root, scripts, data, ui_target):
         if destination.is_symlink():
             raise ValueError(f"refusing symlink staging destination: {destination}")
         if destination.exists() and not destination.is_dir():
             raise ValueError(f"staging destination is not a directory: {destination}")
-    for destination in (binary_target, *ui_target.rglob("*")):
+    for destination in (cli_target, daemon_target, *ui_target.rglob("*")):
         if destination.is_symlink():
             raise ValueError(f"refusing symlink staging destination: {destination}")
-    for source in (binary.resolve(), ui.resolve()):
-        for destination in (binary_dir.resolve(), ui_target.resolve()):
+    for source in (cli_binary.resolve(), daemon_binary.resolve(), ui.resolve()):
+        for destination in (scripts.resolve(), ui_target.resolve()):
             if source.is_relative_to(destination) or destination.is_relative_to(source):
                 raise ValueError("input assets must not overlap their generated staging locations")
 
-    binary_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(binary, binary_target)
-    binary_target.chmod(0o755)
+    scripts.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(cli_binary, cli_target)
+    shutil.copyfile(daemon_binary, daemon_target)
+    cli_target.chmod(0o755)
+    daemon_target.chmod(0o755)
     shutil.copytree(ui, ui_target, dirs_exist_ok=True)
     expected = {path.relative_to(ui) for path in entries}
     for path in sorted(ui_target.rglob("*"), reverse=True):
@@ -67,19 +84,20 @@ def stage_assets(binary: Path, ui: Path) -> tuple[Path, Path]:
                 path.rmdir()
             else:
                 path.unlink()
-    return binary_target, ui_target
+    return cli_target, daemon_target, ui_target
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--cli-binary", type=Path, required=True)
+    parser.add_argument("--daemon-binary", type=Path, required=True)
     parser.add_argument("--ui", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        binary, ui = stage_assets(args.binary, args.ui)
+        cli, daemon, ui = stage_assets(args.cli_binary, args.daemon_binary, args.ui)
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    print(f"Staged {binary}\nStaged {ui}")
+    print(f"Staged {cli}\nStaged {daemon}\nStaged {ui}")
     return 0
 
 

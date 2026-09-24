@@ -6,20 +6,24 @@ import select
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rvx import SnapshotEvent, Source
-from rvx.cli import api_request, build_parser, execute
+from rvx import SnapshotEvent, Source, tracker as rvx_tracker
+from tests.http_api import api_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("RVXD_BINARY", ROOT / "target/debug/rvxd"))
+CLI = Path(os.environ.get("RVX_BINARY", ROOT / "target/debug/rvx"))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -30,7 +34,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-@unittest.skipUnless(os.name == "posix" and BINARY.is_file(), "build rvxd or set RVXD_BINARY")
+@unittest.skipUnless(
+    os.name == "posix" and BINARY.is_file() and CLI.is_file(),
+    "build rvx/rvxd or set RVX_BINARY/RVXD_BINARY",
+)
 class RvxProcessTests(unittest.TestCase):
     """Run the actual daemon against only isolated project-local fixtures."""
 
@@ -44,6 +51,16 @@ class RvxProcessTests(unittest.TestCase):
             stdout, stderr = process.communicate(timeout=10)
             self.fail(f"daemon shutdown exceeded 10s\nstdout:\n{stdout}\nstderr:\n{stderr}")
         self.assertEqual(process.returncode, 0, stdout + stderr)
+
+    def cli(self, base, *arguments):
+        result = subprocess.run(
+            [str(CLI), "--url", base, *arguments],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
 
     def test_cpu_local_two_runs_four_asynchronous_roles(self):
         """Simulate SDK/native HTTP plumbing, not actual RL or multi-node training."""
@@ -234,6 +251,289 @@ class RvxProcessTests(unittest.TestCase):
                     process.kill()
                 process.communicate(timeout=10)
 
+    def test_shared_config_bootstraps_run_sources_and_scraping(self):
+        """Start the daemon from TOML without separate hierarchy or Source registration calls."""
+        build = ROOT / ".build"
+        build.mkdir(exist_ok=True)
+        descriptor = {
+            "protocol_version": 1,
+            "source_session_id": "configured-session",
+            "project": "async-rl",
+            "experiment": "grpo",
+            "run_id": "configured-run",
+            "attempt_id": "attempt-1",
+            "role": "learner",
+            "rank": None,
+            "node_id": "fixture",
+            "pid": None,
+            "labels": {},
+            "schema_version": 1,
+        }
+        snapshot = {
+            "source_session_id": "configured-session",
+            "sequence": 0,
+            "observed_at_ns": 5_000_000_000,
+            "schema_version": 1,
+            "axes": {"optimizer_step": 4},
+            "state": {"phase": "training", "progress": {"loss": 0.25, "step": 4}},
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                parsed = urllib.parse.urlsplit(self.path)
+                if parsed.path == "/v1/snapshots/descriptor":
+                    payload = descriptor
+                elif parsed.path == "/v1/snapshots/history":
+                    after = int(urllib.parse.parse_qs(parsed.query).get("after", ["0"])[0])
+                    payload = {
+                        "protocol_version": 1,
+                        "source_session_id": "configured-session",
+                        "oldest_sequence": 0,
+                        "next_sequence": 1,
+                        "snapshots": [snapshot] if after == 0 else [],
+                    }
+                else:
+                    self.send_error(404)
+                    return
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *args):
+                pass
+
+        with tempfile.TemporaryDirectory(dir=build) as directory, ThreadingHTTPServer(
+            ("127.0.0.1", 0), Handler
+        ) as source_server:
+            fixture = Path(directory)
+            ui = fixture / "ui"
+            ui.mkdir()
+            (ui / "index.html").write_text("<!doctype html><title>fixture</title>")
+            source_thread = threading.Thread(target=source_server.serve_forever)
+            source_thread.start()
+            config = fixture / "rvx.toml"
+            config.write_text(
+                f"""
+version = 1
+[daemon]
+data_dir = "data"
+listen = "127.0.0.1:0"
+[[runs]]
+id = "configured-run"
+project = "async-rl"
+experiment = "grpo"
+name = "trial-1"
+config = {{ batch_size = 32 }}
+[[runs.sources]]
+endpoint = "http://127.0.0.1:{source_server.server_port}"
+role = "learner"
+scrape_interval_ms = 50
+timeout_ms = 400
+[dashboard]
+project = "async-rl"
+experiment = "grpo"
+[[dashboard.panels]]
+type = "metrics"
+paths = ["/progress/loss"]
+axis = "optimizer_step"
+"""
+            )
+            process = subprocess.Popen(
+                [str(BINARY), "--config", str(config), "--ui-dir", str(ui)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertTrue(
+                    select.select([process.stdout], [], [], 10)[0],
+                    "configured daemon did not become ready",
+                )
+                line = process.stdout.readline().strip()
+                self.assertTrue(line.startswith("rvxd listening on http://"), line)
+                base = line.removeprefix("rvxd listening on ")
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if api_request(base, "/api/experiments/stats")["snapshots"] == 1:
+                        break
+                    time.sleep(0.02)
+                projects = api_request(base, "/api/experiments/projects")["projects"]
+                self.assertEqual([project["name"] for project in projects], ["async-rl"])
+                experiments = api_request(base, "/api/experiments/experiments")["experiments"]
+                self.assertEqual([experiment["name"] for experiment in experiments], ["grpo"])
+                runs = api_request(base, "/api/experiments/runs")["runs"]
+                self.assertEqual(runs[0]["id"], "configured-run")
+                self.assertEqual(runs[0]["status"], "running")
+                self.assertEqual(json.loads(runs[0]["config_json"]), {"batch_size": 32})
+                sources = api_request(
+                    base,
+                    "/api/experiments/sources?run_id=configured-run",
+                )["sources"]
+                self.assertEqual(len(sources), 1)
+                self.assertEqual(sources[0]["role"], "learner")
+                latest = api_request(
+                    base,
+                    "/api/snapshots/latest",
+                    method="POST",
+                    payload={"run_id": "configured-run"},
+                )["snapshots"]
+                self.assertEqual(latest[0]["state"]["progress"]["step"], 4)
+                dashboard = subprocess.run(
+                    [
+                        str(CLI),
+                        "--url",
+                        base,
+                        "tui",
+                        "--config",
+                        str(config),
+                        "--once",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(dashboard.returncode, 0, dashboard.stdout + dashboard.stderr)
+                self.assertIn("configured-run", dashboard.stdout)
+                self.assertIn("/progress/loss [learner]", dashboard.stdout)
+                self.assertIn("0.25", dashboard.stdout)
+                self.stop_daemon(process, signal.SIGTERM)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=10)
+                source_server.shutdown()
+                source_thread.join(timeout=5)
+                self.assertFalse(source_thread.is_alive())
+
+    def test_native_tracker_flows_through_the_standard_snapshot_pipeline(self):
+        build = ROOT / ".build"
+        build.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build) as directory:
+            fixture = Path(directory)
+            ui = fixture / "ui"
+            ui.mkdir()
+            (ui / "index.html").write_text("<!doctype html><title>fixture</title>")
+            process = subprocess.Popen(
+                [
+                    str(BINARY),
+                    "--data-dir",
+                    str(fixture / "data"),
+                    "--listen",
+                    "127.0.0.1:0",
+                    "--ui-dir",
+                    str(ui),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            tracker = None
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 10)[0])
+                base = process.stdout.readline().strip().removeprefix(
+                    "rvxd listening on "
+                )
+                project = self.cli(base, "projects", "create", "tracker")
+                experiment = self.cli(
+                    base,
+                    "experiments",
+                    "create",
+                    "--project",
+                    project["id"],
+                    "native",
+                )
+                run = self.cli(
+                    base,
+                    "runs",
+                    "create",
+                    "--experiment",
+                    experiment["id"],
+                    "trial",
+                )
+                tracker = rvx_tracker.Run(
+                    project="tracker",
+                    experiment="native",
+                    name="trial",
+                    run_id=run["id"],
+                    alert_rules=["loss > 2 => error: high loss"],
+                    span_count=True,
+                    serve=True,
+                )
+                self.cli(
+                    base,
+                    "sources",
+                    "register",
+                    "--run",
+                    run["id"],
+                    "--role",
+                    "tracker",
+                    "--endpoint",
+                    tracker.endpoint,
+                    "--interval-ms",
+                    "50",
+                    "--timeout-ms",
+                    "400",
+                )
+                artifact = fixture / "checkpoint.bin"
+                artifact.write_bytes(b"weights")
+                tracker.log_artifact(artifact, name="model", type="checkpoint")
+                tracker.log({}, step=3)
+                with rvx_tracker.Span(tracker, "forward", {"batch": 2}):
+                    pass
+                tracker.log({"loss": 3.0}, step=3, commit=True)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if api_request(base, "/api/experiments/stats")["snapshots"] >= 2:
+                        break
+                    time.sleep(0.02)
+                history = api_request(
+                    base,
+                    "/api/snapshots/history",
+                    method="POST",
+                    payload={"run_id": run["id"]},
+                )["snapshots"]
+                self.assertTrue(any(row["state"]["artifacts"] for row in history))
+                latest = history[0]["state"]
+                self.assertEqual(latest["metrics"]["loss"], 3.0)
+                self.assertEqual(latest["alerts"][0]["message"], "high loss")
+                self.assertEqual(latest["spans"][0]["name"], "forward")
+                query = self.cli(
+                    base,
+                    "query",
+                    "--run",
+                    run["id"],
+                    "--field",
+                    "/metrics/loss",
+                    "--axis",
+                    "step",
+                )
+                self.assertEqual(
+                    [value for value in query["series"][0]["values"] if value is not None],
+                    [3.0],
+                )
+                trace_path = fixture / "trace.json"
+                exported = self.cli(
+                    base,
+                    "trace",
+                    "--run",
+                    run["id"],
+                    "--output",
+                    str(trace_path),
+                )
+                self.assertEqual(exported["spans_exported"], 1)
+                trace = json.loads(trace_path.read_text())
+                self.assertEqual(trace["traceEvents"][0]["name"], "forward")
+                self.stop_daemon(process, signal.SIGTERM)
+            finally:
+                if tracker is not None:
+                    tracker.close()
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=10)
+
     def test_cli_management_static_routes_and_clean_restart(self):
         """Persist native control data through graceful SIGTERM/SIGINT shutdown."""
         build = ROOT / ".build"
@@ -264,16 +564,22 @@ class RvxProcessTests(unittest.TestCase):
                         self.assertEqual(response.read(), b"ok\n")
                     self.assertEqual(api_request(base, "/api/experiments/stats")["projects"], index)
                     if index == 0:
-                        project = api_request(
-                            base, "/api/experiments/projects", method="POST", payload={"name": "persisted"}
+                        project = self.cli(base, "projects", "create", "persisted")
+                        experiment = self.cli(
+                            base,
+                            "experiments",
+                            "create",
+                            "--project",
+                            project["id"],
+                            "snapshots",
                         )
-                        experiment = api_request(
-                            base, "/api/experiments/experiments", method="POST",
-                            payload={"project_id": project["id"], "name": "snapshots"},
-                        )
-                        run = api_request(
-                            base, "/api/experiments/runs", method="POST",
-                            payload={"experiment_id": experiment["id"], "name": "run", "config": {}},
+                        run = self.cli(
+                            base,
+                            "runs",
+                            "create",
+                            "--experiment",
+                            experiment["id"],
+                            "run",
                         )
                         with Source(
                             project="persisted", experiment="snapshots", run_id=run["id"], role="worker",
@@ -284,12 +590,20 @@ class RvxProcessTests(unittest.TestCase):
                                 SnapshotEvent({"progress": {"loss": 0.4}, "nullable": None}, 20),
                             ])
                             producer.seal()
-                            api_request(
-                                base, "/api/experiments/sources", method="POST",
-                                payload={
-                                    "run_id": run["id"], "attempt_id": "attempt-1", "role": "worker",
-                                    "endpoint": producer.endpoint, "scrape_interval_ms": 50, "timeout_ms": 400,
-                                },
+                            self.cli(
+                                base,
+                                "sources",
+                                "register",
+                                "--run",
+                                run["id"],
+                                "--role",
+                                "worker",
+                                "--endpoint",
+                                producer.endpoint,
+                                "--interval-ms",
+                                "50",
+                                "--timeout-ms",
+                                "400",
                             )
                             deadline = time.monotonic() + 10
                             while time.monotonic() < deadline:
@@ -297,24 +611,30 @@ class RvxProcessTests(unittest.TestCase):
                                     break
                                 time.sleep(0.02)
                             self.assertEqual(api_request(base, "/api/experiments/stats")["snapshots"], 2)
-                    latest = execute(build_parser().parse_args([
-                        "--url", base, "snapshots", "latest", "--run", run["id"],
-                    ]))
+                    latest = self.cli(base, "snapshots", "latest", "--run", run["id"])
                     self.assertEqual(latest["snapshots"][0]["state"],
                                      {"progress": {"loss": 0.4}, "nullable": None})
-                    history = execute(build_parser().parse_args([
-                        "--url", base, "snapshots", "history", "--run", run["id"],
-                    ]))
+                    history = self.cli(base, "snapshots", "history", "--run", run["id"])
                     self.assertEqual([row["sequence"] for row in history["snapshots"]], [1, 0])
                     after, before = history["snapshots"]
-                    diff = execute(build_parser().parse_args([
-                        "--url", base, "snapshots", "diff",
-                        "--before-id", str(before["id"]), "--after-id", str(after["id"]),
-                    ]))
+                    diff = self.cli(
+                        base,
+                        "snapshots",
+                        "diff",
+                        "--before-id",
+                        str(before["id"]),
+                        "--after-id",
+                        str(after["id"]),
+                    )
                     self.assertIn({"path": "/removed", "kind": "removed", "before": True}, diff["changes"])
-                    trend = execute(build_parser().parse_args([
-                        "--url", base, "query", "--run", run["id"], "--field", "/progress/loss",
-                    ]))
+                    trend = self.cli(
+                        base,
+                        "query",
+                        "--run",
+                        run["id"],
+                        "--field",
+                        "/progress/loss",
+                    )
                     self.assertEqual(trend["axis"], "wall_time")
                     self.assertEqual(trend["series"][0]["values"], [0.8, 0.4])
                     self.assertEqual(api_request(base, "/api/experiments/projects"), {"projects": [project]})

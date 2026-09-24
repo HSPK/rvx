@@ -21,7 +21,7 @@ import urllib.request
 
 import rvx
 from rvx import RvxError, RvxService, RvxSettings, Source
-from rvx.cli import api_request
+from tests.http_api import api_request
 
 
 INSTALLED = Path(rvx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
@@ -31,16 +31,21 @@ SCRIPTS = Path(sys.executable).absolute().parent
 @unittest.skipUnless(INSTALLED and os.name == "posix", "requires a noneditable installed RVX wheel")
 class InstalledWheelTests(unittest.TestCase):
     def test_metadata_native_namespace_and_entrypoints(self):
-        from rvx._native import RvxEngine, RvxSource
+        from rvx._native import RvxEngine, RvxSource, RvxTracker, RvxTrackerSpan
         self.assertEqual(RvxEngine.__module__, "rvx._native")
         self.assertEqual(RvxSource.__module__, "rvx._native")
+        self.assertEqual(RvxTracker.__module__, "rvx._native")
+        self.assertEqual(RvxTrackerSpan.__module__, "rvx._native")
         self.assertTrue(all(callable(value) for value in (Source, RvxService, RvxSettings, RvxError)))
         metadata = distribution("rvx")
         self.assertEqual(metadata.metadata["Author"], "hspk")
         self.assertEqual(metadata.metadata["License-Expression"], "MIT")
         files = {str(path) for path in metadata.files}
-        self.assertIn("rvx/_bin/rvxd", files)
-        self.assertIn("rvx/_web/index.html", files)
+        self.assertTrue((SCRIPTS / "rvx").is_file())
+        self.assertTrue((SCRIPTS / "rvxd").is_file())
+        self.assertTrue((Path(sys.prefix) / "share" / "rvx" / "web" / "index.html").is_file())
+        self.assertNotIn("rvx/cli.py", files)
+        self.assertNotIn("rvx/tui.py", files)
         self.assertFalse(any(path.startswith("src/") for path in files))
         self.assertTrue(any(path.endswith("/licenses/LICENSE") for path in files))
         self.assertTrue(any(path.endswith("/licenses/THIRD_PARTY_NOTICES.md") for path in files))
@@ -48,14 +53,33 @@ class InstalledWheelTests(unittest.TestCase):
         for command, name in (
             ([str(SCRIPTS / "rvx")], "rvx"),
             ([str(SCRIPTS / "rvxd")], "rvxd"),
-            ([sys.executable, "-I", "-m", "rvx"], "rvx"),
-            ([str(Path(rvx.__file__).parent / "_bin" / "rvxd")], "rvxd"),
         ):
             result = subprocess.run(
                 [*command, "--version"], capture_output=True, text=True, check=True,
                 env={**os.environ, "PATH": str(SCRIPTS)},
             )
             self.assertEqual(result.stdout.strip(), f"{name} {version('rvx')}")
+
+    def test_native_tracker_is_available_without_expr_tracker(self):
+        from rvx import tracker as et
+
+        run = et.Run(
+            project="installed",
+            experiment="tracker",
+            name="run",
+            run_id="run",
+            alert_rules=["loss > 1 => error: high"],
+        )
+        try:
+            with et.Span(run, "forward", {"batch": 1}):
+                pass
+            run.log({"loss": 2.0})
+            state = json.loads(run.latest_bytes())["state"]
+            self.assertEqual(state["metrics"]["loss"], 2.0)
+            self.assertEqual(state["alerts"][0]["message"], "high")
+            self.assertEqual(state["spans"][0]["name"], "forward")
+        finally:
+            run.close()
 
     def start_daemon(self, command, directory):
         process = subprocess.Popen(
@@ -92,7 +116,6 @@ class InstalledWheelTests(unittest.TestCase):
             commands = (
                 ([str(SCRIPTS / "rvx"), "serve"], signal.SIGTERM),
                 ([str(SCRIPTS / "rvxd")], signal.SIGINT),
-                ([sys.executable, "-I", "-m", "rvx", "serve"], signal.SIGTERM),
             )
             for index, (command, stop_signal) in enumerate(commands):
                 with self.subTest(command=command, stop_signal=stop_signal):

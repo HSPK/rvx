@@ -10,6 +10,10 @@ This is an observation of a role's published state, not a memory image or
 model checkpoint. Each Source has its own consistency boundary. Combining
 Sources by time does not imply a distributed atomic snapshot.
 
+The native step-oriented tracker follows this same contract rather than adding
+a metric store: each committed step is a complete Source snapshot with a
+logical `step` axis. See [Native experiment tracker](tracker.md).
+
 ## Producer protocol
 
 ```text

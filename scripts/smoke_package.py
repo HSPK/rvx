@@ -26,10 +26,24 @@ def request(base: str, path: str, payload: dict | None = None):
 def smoke() -> None:
     """Prove the installed wheel contains a runnable native daemon, UI, and producer."""
     import rvx
-    from rvx import Source
+    from rvx import Source, tracker
 
     if not Path(rvx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
         raise RuntimeError("smoke must import an installed wheel, not the source checkout")
+    tracked = tracker.Run(
+        project="wheel-smoke",
+        experiment="native-tracker",
+        name="tracker",
+        run_id="tracker",
+        alert_rules=["loss > 1 => error: high"],
+    )
+    try:
+        tracked.log({"loss": 2.0})
+        tracked_state = json.loads(tracked.latest_bytes())["state"]
+        if tracked_state["alerts"][0]["message"] != "high":
+            raise RuntimeError("native tracker alert did not reach its snapshot")
+    finally:
+        tracked.close()
     scripts = Path(sys.executable).parent
     os.environ["PATH"] = str(scripts)
     with tempfile.TemporaryDirectory(prefix="rvx-installed-", dir=Path.cwd()) as directory:

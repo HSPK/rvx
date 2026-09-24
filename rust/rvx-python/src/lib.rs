@@ -1,6 +1,7 @@
 #![allow(non_local_definitions)]
 
 mod source;
+mod tracker;
 
 use std::sync::Arc;
 
@@ -136,6 +137,28 @@ impl RvxEngine {
             .map_err(rvx_engine::EngineError::from)
         })
         .map_err(runtime_error)
+    }
+
+    fn ensure_hierarchy(
+        &self,
+        py: Python<'_>,
+        project_name: String,
+        experiment_name: String,
+        run_name: String,
+        config_json: String,
+    ) -> PyResult<String> {
+        py.allow_threads(|| {
+            let (project, experiment, run) = self
+                .engine
+                .ensure_hierarchy(&project_name, &experiment_name, &run_name, &config_json)
+                .map_err(runtime_error)?;
+            serde_json::to_string(&serde_json::json!({
+                "project": project,
+                "experiment": experiment,
+                "run": run,
+            }))
+            .map_err(runtime_error)
+        })
     }
 
     #[pyo3(signature = (experiment_id=None))]
@@ -320,5 +343,7 @@ fn runtime_error(error: impl std::fmt::Display) -> PyErr {
 fn _native(_py: Python<'_>, module: &PyModule) -> PyResult<()> {
     module.add_class::<RvxEngine>()?;
     module.add_class::<source::RvxSource>()?;
+    module.add_class::<tracker::RvxTracker>()?;
+    module.add_class::<tracker::RvxTrackerSpan>()?;
     Ok(())
 }

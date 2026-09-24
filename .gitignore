@@ -15,8 +15,11 @@ web/coverage/
 web/artifacts/
 web/test-results/
 web/playwright-report/
-src/rvx/_bin/
-src/rvx/_web/
+rvx.data/**
+!rvx.data/data/
+!rvx.data/data/share/
+!rvx.data/data/share/rvx/
+!rvx.data/data/share/rvx/README.txt
 *.dylib
 *.pyd
 .DS_Store

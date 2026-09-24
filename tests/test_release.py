@@ -31,13 +31,19 @@ class ReleaseContractTests(unittest.TestCase):
             "rvx/__init__.py": "",
             "rvx/source.py": "",
             "rvx/adapters.py": "",
-            "rvx/cli.py": "",
+            "rvx/service.py": "",
+            "rvx/tracker.py": "",
+            "rvx/_tracker_span.py": "",
+            "rvx/_tracker_values.py": "",
+            "rvx/config.py": "",
+            "rvx/errors.py": "",
             "rvx/_native.abi3.so": "test-extension-placeholder",
-            "rvx/_bin/rvxd": "test-executable-placeholder",
-            "rvx/_web/index.html": '<script src="/assets/app.js"></script>',
-            "rvx/_web/assets/app.js": "test-ui",
-            "rvx/_web/login/index.html": '<script src="/login/assets/login.js"></script>',
-            "rvx/_web/login/assets/login.js": "test-login-ui",
+            "rvx-0.1.0.data/scripts/rvx": "test-cli-placeholder",
+            "rvx-0.1.0.data/scripts/rvxd": "test-daemon-placeholder",
+            "rvx-0.1.0.data/data/share/rvx/web/index.html": '<script src="/assets/app.js"></script>',
+            "rvx-0.1.0.data/data/share/rvx/web/assets/app.js": "test-ui",
+            "rvx-0.1.0.data/data/share/rvx/web/login/index.html": '<script src="/login/assets/login.js"></script>',
+            "rvx-0.1.0.data/data/share/rvx/web/login/assets/login.js": "test-login-ui",
             "rvx-0.1.0.dist-info/METADATA": (
                 "Metadata-Version: 2.4\nName: rvx\nVersion: 0.1.0\n"
                 + (f"Requires-Dist: {dependency}\n" if dependency else "")
@@ -52,7 +58,8 @@ class ReleaseContractTests(unittest.TestCase):
                 if name in omitted:
                     continue
                 info = ZipInfo(name)
-                info.external_attr = (0o100755 if executable and name.endswith("/rvxd") else 0o100644) << 16
+                native = name.endswith(("/rvx", "/rvxd"))
+                info.external_attr = (0o100755 if executable and native else 0o100644) << 16
                 archive.writestr(info, content)
         return path
 
@@ -61,9 +68,13 @@ class ReleaseContractTests(unittest.TestCase):
             path = self.fixture_wheel(directory)
             check_wheel(path, "0.1.0", "macosx_11_0_arm64")
             for omitted in (
-                ("rvx/_bin/rvxd",), ("rvx/_web/index.html",),
-                ("rvx/_web/assets/app.js",), ("rvx/_native.abi3.so",),
-                ("rvx/_web/login/index.html",), ("rvx/_web/login/assets/login.js",),
+                ("rvx-0.1.0.data/scripts/rvx",),
+                ("rvx-0.1.0.data/scripts/rvxd",),
+                ("rvx-0.1.0.data/data/share/rvx/web/index.html",),
+                ("rvx-0.1.0.data/data/share/rvx/web/assets/app.js",),
+                ("rvx/_native.abi3.so",),
+                ("rvx-0.1.0.data/data/share/rvx/web/login/index.html",),
+                ("rvx-0.1.0.data/data/share/rvx/web/login/assets/login.js",),
             ):
                 with self.subTest(omitted=omitted):
                     path = self.fixture_wheel(directory, omitted=omitted)

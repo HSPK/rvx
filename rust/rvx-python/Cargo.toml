@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 rvx-core = { path = "../rvx-core" }
 rvx-engine = { path = "../rvx-engine" }
 rvx-snapshots = { path = "../rvx-snapshots" }
+rvx-tracker = { path = "../rvx-tracker" }
 axum.workspace = true
 parking_lot.workspace = true
 pyo3.workspace = true

@@ -1,11 +1,14 @@
 mod access;
 mod auth;
+mod bootstrap;
 mod connection;
 mod delivery;
 mod ui;
 
 pub use access::AccessPolicy;
+pub use bootstrap::apply_config;
 pub use connection::UiConnections;
+pub use rvx_config as config;
 
 use std::path::PathBuf;
 use std::sync::Arc;

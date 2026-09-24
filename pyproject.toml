@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rvx"
-version = "0.2.0"
+version = "0.3.0"
 description = "Full-state snapshot SDK, native observability server, CLI, and Web UI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,10 +27,8 @@ Issues = "https://github.com/HSPK/rvx/issues"
 
 [project.optional-dependencies]
 aiohttp = ["aiohttp>=3.12,<4"]
-
-[project.scripts]
-rvx = "rvx.cli:main"
-rvxd = "rvx.cli:daemon_main"
+pandas = ["pandas>=1.5"]
+polars = ["polars>=0.20"]
 
 [dependency-groups]
 dev = [
@@ -46,10 +44,7 @@ python-source = "src"
 module-name = "rvx._native"
 bindings = "pyo3"
 locked = true
-include = [
-  { path = "rvx/_bin/rvxd", format = "wheel" },
-  { path = "rvx/_web/**/*", format = "wheel" },
-]
+data = "rvx.data"
 
 [tool.uv]
 cache-keys = [
@@ -60,8 +55,12 @@ cache-keys = [
   { file = "rust/**/Cargo.toml" },
   { file = "rust/**/*.rs" },
   { file = "src/rvx/**/*.py" },
-  { file = "src/rvx/_bin/rvxd" },
-  { file = "src/rvx/_web/**/*" },
+  { file = "rust/rvx-cli/**/*.rs" },
+  { file = "rust/rvx-config/**/*.rs" },
+  { file = "rust/rvx-tracker/**/*.rs" },
+  { file = "rvx.data/scripts/rvx" },
+  { file = "rvx.data/scripts/rvxd" },
+  { file = "rvx.data/data/share/rvx/web/**/*" },
   { file = "scripts/package_assets.py" },
   { file = "LICENSE" },
   { file = "THIRD_PARTY_NOTICES.md" },

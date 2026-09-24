@@ -21,7 +21,7 @@ Actor / Learner / Evaluator / node snapshot endpoints
                        |
        latest / history / diff / field projections
                        |
-             experiment UI + Python CLI
+          experiment UI + native CLI/TUI
 ```
 
 A capture is a full replacement: absent fields disappear, and old snapshots
@@ -36,22 +36,58 @@ claim a globally atomic snapshot across asynchronous roles.
 ## Install a release
 
 The `rvx` PyPI distribution is one complete package: Python SDK, internal
-native extension, native `rvxd` executable, and the built Web UI.
+native extension, native `rvx`/`rvxd` executables, and the built Web UI.
 Prebuilt wheels target Linux x86_64/arm64 (glibc 2.28+) and macOS
 x86_64/arm64 (11+), with Python 3.11+. Rust and Node are not required by users.
+The control CLI, TUI, daemon, storage, and query paths are Rust; Python remains
+only for the SDK surface and ASGI/aiohttp integration.
 
 ```bash
 uv tool install rvx
 rvx serve --data-dir /absolute/path/to/rvx-data
 ```
 
-Version `0.2.0` includes the charts-first workspace, browser sign-in, and snapshot
-Bar/Status views. The older `0.1.0` release predates this redesign; published
-releases are immutable. Back up persistent storage before upgrading this
-Pre-alpha application.
+Version `0.3.0` moves the control CLI and terminal dashboard fully into Rust
+and adds the native step tracker, alert engine, spans, trace export, and artifact
+lineage. Python remains only for the SDK and framework adapters. Version
+`0.2.0` introduced the charts-first Web workspace and browser sign-in.
+Published releases are immutable. Back up persistent storage before upgrading
+this Pre-alpha application.
 
 To use the SDK inside an ML project's environment instead, run `uv add rvx`
 and import `Source` from `rvx`.
+
+For wandb-style step logging backed by the same snapshot pipeline:
+
+```python
+from rvx import tracker as et
+
+run = et.init(
+    project="async-rl",
+    experiment="grpo",
+    name="trial-1",
+    run_id="trial-1",
+    serve=True,
+    alert_rules=["isnan(loss) => critical: invalid loss"],
+)
+et.log({"loss": 0.184}, step=1, commit=True)
+```
+
+The tracker core, alert DSL/watchdog/delivery, span aggregation, and artifact
+lineage are Rust. See [the native tracker guide](docs/tracker.md).
+
+For a training-focused terminal dashboard, one TOML file can bootstrap static
+Source registrations and define metric, current-snapshot, and Run-metadata
+panels:
+
+```bash
+rvx daemon --config rvx.toml
+rvx tui --config rvx.toml
+```
+
+The TUI automatically follows the newest running Run in the configured Project
+and Experiment while reading the same HTTP APIs and stored observations as the
+Web UI. See [the config-driven daemon and TUI guide](docs/tui.md).
 
 Release artifacts and PyPI Trusted Publishing are configured in
 [`.github/workflows/release.yml`](.github/workflows/release.yml);
@@ -65,12 +101,15 @@ Requires the pinned Rust toolchain, Python 3.11+, uv, and Node.js 22+:
 
 ```bash
 uv sync --locked
-cargo build --locked --release -p rvx-server
 npm --prefix web ci
 npm --prefix web run build
-uv run python scripts/package_assets.py --binary target/release/rvxd --ui web/dist
+cargo build --locked --release -p rvx-server -p rvx-cli
+python scripts/package_assets.py \
+  --cli-binary target/release/rvx \
+  --daemon-binary target/release/rvxd \
+  --ui web/dist
 
-./target/release/rvxd \
+./target/release/rvx serve \
   --data-dir /absolute/path/to/rvx-data \
   --listen 127.0.0.1:9110 \
   --ui-dir /absolute/path/to/rvx/web/dist
@@ -134,9 +173,9 @@ wheel; do not assume the previously loaded native binary is still selected.
 Create the metadata hierarchy using the CLI:
 
 ```bash
-uv run rvx projects create async-rl
-uv run rvx experiments create --project PROJECT_ID grpo
-uv run rvx runs create --experiment EXPERIMENT_ID trial-1
+rvx projects create async-rl
+rvx experiments create --project PROJECT_ID grpo
+rvx runs create --experiment EXPERIMENT_ID trial-1
 ```
 
 In a role process:
@@ -166,11 +205,11 @@ source.capture(
 Register its reachable endpoint in the shared server:
 
 ```bash
-uv run rvx sources register --run RUN_ID --role learner \
+rvx sources register --run RUN_ID --role learner \
   --endpoint http://127.0.0.1:9200
-uv run rvx snapshots latest --run RUN_ID
-uv run rvx snapshots history --run RUN_ID
-uv run rvx query --run RUN_ID --field /progress/loss
+rvx snapshots latest --run RUN_ID
+rvx snapshots history --run RUN_ID
+rvx query --run RUN_ID --field /progress/loss
 ```
 
 `Source` owns a bounded native snapshot buffer, not a mandatory HTTP server.

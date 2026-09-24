@@ -64,7 +64,7 @@ impl RvxSource {
         capacity=1_024,
         max_buffer_bytes=67_108_864
     ))]
-    fn new(
+    pub(crate) fn new(
         py: Python<'_>,
         identity_json: String,
         capacity: usize,
@@ -112,7 +112,7 @@ impl RvxSource {
 
     /// Bind the requested address and start exactly one native HTTP worker.
     #[pyo3(signature = (listen="127.0.0.1:0"))]
-    fn serve(&self, py: Python<'_>, listen: &str) -> PyResult<String> {
+    pub(crate) fn serve(&self, py: Python<'_>, listen: &str) -> PyResult<String> {
         self.check_process()?;
         py.allow_threads(|| {
             let listen: SocketAddr = listen.parse().map_err(input_error)?;
@@ -137,7 +137,7 @@ impl RvxSource {
 
     /// Return the bound endpoint only while the native server is running.
     #[getter]
-    fn endpoint(&self, py: Python<'_>) -> PyResult<String> {
+    pub(crate) fn endpoint(&self, py: Python<'_>) -> PyResult<String> {
         self.check_process()?;
         py.allow_threads(|| {
             let owned = self.serving.lock();
@@ -152,7 +152,7 @@ impl RvxSource {
 
     /// Expose the immutable generated identity for this process's producer session.
     #[getter]
-    fn source_session_id(&self) -> PyResult<String> {
+    pub(crate) fn source_session_id(&self) -> PyResult<String> {
         self.check_process()?;
         Ok(self.session_id.clone())
     }
@@ -174,7 +174,7 @@ impl RvxSource {
     }
 
     /// Freeze capture but keep HTTP reads available for the last Pull requests.
-    fn seal(&self, py: Python<'_>) -> PyResult<u64> {
+    pub(crate) fn seal(&self, py: Python<'_>) -> PyResult<u64> {
         self.check_process()?;
         py.allow_threads(|| {
             let lifecycle = self.lifecycle.lock();
@@ -184,24 +184,24 @@ impl RvxSource {
     }
 
     /// Report retention and eviction counters without fetching data over HTTP.
-    fn stats_json(&self, py: Python<'_>) -> PyResult<String> {
+    pub(crate) fn stats_json(&self, py: Python<'_>) -> PyResult<String> {
         self.check_process()?;
         py.allow_threads(|| serde_json::to_string(&self.producer.stats()).map_err(operation_error))
     }
 
     /// Return descriptor wire bytes without constructing a Python object tree.
-    fn descriptor_bytes<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
+    pub(crate) fn descriptor_bytes<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
         self.read_bytes(py, SnapshotProducer::descriptor_bytes)
     }
 
     /// Return latest wire bytes, or fail until the first capture is available.
-    fn latest_bytes<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
+    pub(crate) fn latest_bytes<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
         self.read_bytes(py, SnapshotProducer::latest_bytes)
     }
 
     /// Return a bounded history page serialized from shared immutable snapshots.
     #[pyo3(signature = (after=0, limit=64))]
-    fn history_bytes<'py>(
+    pub(crate) fn history_bytes<'py>(
         &self,
         py: Python<'py>,
         #[pyo3(from_py_with = "history_cursor")] after: u64,
@@ -211,19 +211,23 @@ impl RvxSource {
     }
 
     /// Stop only the owned HTTP listener, preserving capture and the producer session.
-    fn stop_serving(&self, py: Python<'_>) -> PyResult<()> {
+    pub(crate) fn stop_serving(&self, py: Python<'_>) -> PyResult<()> {
         self.check_process()?;
         py.allow_threads(|| self.stop_serving_native().map_err(operation_error))
     }
 
     /// Stop captures, shut down HTTP, and await or cancel the owned task.
-    fn close(&self, py: Python<'_>) -> PyResult<()> {
+    pub(crate) fn close(&self, py: Python<'_>) -> PyResult<()> {
         self.check_process()?;
         py.allow_threads(|| self.close_native().map_err(operation_error))
     }
 }
 
 impl RvxSource {
+    pub(crate) fn producer(&self) -> Arc<SnapshotProducer> {
+        Arc::clone(&self.producer)
+    }
+
     /// Reject inherited runtimes instead of using locks and threads copied by fork.
     fn check_process(&self) -> PyResult<()> {
         if std::process::id() != self.owner_pid {

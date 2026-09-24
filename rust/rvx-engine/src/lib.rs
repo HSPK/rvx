@@ -1,12 +1,12 @@
-mod chart_index;
 mod auth_sessions;
+mod chart_index;
 mod repository;
 mod snapshot_store;
 mod snapshot_views;
 mod ui_state;
 
-pub use ui_state::{valid_browser_id, UiSession};
 pub use auth_sessions::{AUTH_SESSION_SECONDS, MAX_AUTH_SESSIONS};
+pub use ui_state::{valid_browser_id, UiSession};
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -20,9 +20,9 @@ use rvx_core::{
     EngineStats, Experiment, Project, Run, RunStatus, SnapshotDescriptor, SnapshotDiffRequest,
     SnapshotDiffResponse, SnapshotHistoryPage, SnapshotHistoryRequest, SnapshotHistoryResponse,
     SnapshotLatestRequest, SnapshotLatestResponse, SnapshotQueryRequest, SnapshotQueryResponse,
-    Source, SourceRegistration, SourceState, StoredSnapshot,
-    TableCatalogRequest, TableCatalogResponse, TableRowsRequest, TableRowsResponse,
-    TableSummaryRequest, TableSummaryResponse,
+    Source, SourceRegistration, SourceState, StoredSnapshot, TableCatalogRequest,
+    TableCatalogResponse, TableRowsRequest, TableRowsResponse, TableSummaryRequest,
+    TableSummaryResponse,
 };
 use thiserror::Error;
 use tokio::sync::{watch, Semaphore};
@@ -30,8 +30,8 @@ use tokio::task::JoinSet;
 use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
 
 use repository::Repository;
-use snapshot_store::SnapshotStore;
 pub use snapshot_store::tables::TableReadControl;
+use snapshot_store::SnapshotStore;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -112,6 +112,53 @@ impl Engine {
 
     pub fn create_run(&self, experiment_id: &str, name: &str, config_json: &str) -> Result<Run> {
         self.repository.create_run(experiment_id, name, config_json)
+    }
+
+    /// Idempotently create the named hierarchy used by embedded Python SDK callers.
+    pub fn ensure_hierarchy(
+        &self,
+        project_name: &str,
+        experiment_name: &str,
+        run_name: &str,
+        config_json: &str,
+    ) -> Result<(Project, Experiment, Run)> {
+        let project = self
+            .list_projects()?
+            .into_iter()
+            .find(|project| project.name == project_name)
+            .map(Ok)
+            .unwrap_or_else(|| self.create_project(project_name))?;
+        let experiment = self
+            .list_experiments(Some(&project.id))?
+            .into_iter()
+            .find(|experiment| experiment.name == experiment_name)
+            .map(Ok)
+            .unwrap_or_else(|| self.create_experiment(&project.id, experiment_name))?;
+        let run = self
+            .list_runs(Some(&experiment.id))?
+            .into_iter()
+            .find(|run| run.name == run_name)
+            .map(Ok)
+            .unwrap_or_else(|| self.create_run(&experiment.id, run_name, config_json))?;
+        Ok((project, experiment, run))
+    }
+
+    /// Idempotently materialize one config-owned hierarchy with a caller-stable Run ID.
+    pub fn ensure_configured_run(
+        &self,
+        run_id: &str,
+        project_name: &str,
+        experiment_name: &str,
+        run_name: &str,
+        config_json: &str,
+    ) -> Result<Run> {
+        self.repository.ensure_configured_run(
+            run_id,
+            project_name,
+            experiment_name,
+            run_name,
+            config_json,
+        )
     }
 
     pub fn list_runs(&self, experiment_id: Option<&str>) -> Result<Vec<Run>> {
@@ -317,7 +364,8 @@ impl Engine {
         let source =
             tokio::task::spawn_blocking(move || engine.repository.source_by_id(&source_id))
                 .await
-                .map_err(|e| EngineError::Runtime(e.to_string()))??;
+                .map_err(|e| EngineError::Runtime(e.to_string()))??
+                .source;
         // Entries are created only for persisted registrations, never arbitrary caller IDs.
         let owner = {
             let mut owners = self.scrape_owners.lock();
@@ -329,9 +377,10 @@ impl Engine {
         let owner = owner.lock_owned().await;
         let engine = self.clone();
         let id = source.id.clone();
-        let source = tokio::task::spawn_blocking(move || engine.repository.source_by_id(&id))
+        let scoped = tokio::task::spawn_blocking(move || engine.repository.source_by_id(&id))
             .await
             .map_err(|e| EngineError::Runtime(e.to_string()))??;
+        let source = scoped.source;
         if matches!(
             source.state,
             SourceState::Draining | SourceState::Ended | SourceState::Lost
@@ -342,7 +391,9 @@ impl Engine {
             .pull_json(&source, "/v1/snapshots/descriptor", 256 * 1024)
             .await?;
         validate_snapshot_descriptor(&descriptor)?;
-        if descriptor.run_id != source.run_id
+        if descriptor.project != scoped.project
+            || descriptor.experiment != scoped.experiment
+            || descriptor.run_id != source.run_id
             || descriptor.attempt_id != source.attempt_id
             || descriptor.role != source.role
         {
