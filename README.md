@@ -55,7 +55,7 @@ Published releases are immutable. Back up persistent storage before upgrading
 this Pre-alpha application.
 
 To use the SDK inside an ML project's environment instead, run `uv add rvx`
-and import `Source` from `rvx`.
+and import `Source` or `RvxClient` from `rvx`.
 
 For wandb-style step logging backed by the same snapshot pipeline:
 

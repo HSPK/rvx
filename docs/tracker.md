@@ -13,6 +13,7 @@ run = et.init(
     experiment="training",
     name="trial-1",
     run_id="trial-1",
+    step_axis="trainer/step",
     serve=True,
     port=9200,
     config={"batch_size": 32},
@@ -31,6 +32,10 @@ for step in range(1_000):
 
 et.finish()
 ```
+
+`step_axis` selects the logical axis stored in every committed Snapshot. It
+defaults to `step`; asynchronous applications may use names such as
+`trainer/step` or `policy/version`.
 
 Register `run.endpoint` as an ordinary Source, or place the endpoint in
 `rvx.toml`. Streams and distributed ranks are independent Sources:

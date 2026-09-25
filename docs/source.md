@@ -192,10 +192,37 @@ must not prevent the Source from recording or serving another mounted reader.
 
 Create one producer inside each worker process. Inherited producers reject
 operations after `fork`; a fresh instance has a fresh session and starts its
-sequence at zero. Public exports are `Source`, `SnapshotEvent`,
-`CaptureReceipt`, and `SourceStats`. There are no old-name aliases, independent
-metric logging methods, or Push ingestion APIs. Hostmon keeps its independent
-producer implementation and does not acquire a RVX dependency.
+sequence at zero. Public exports include `Source`, `SnapshotEvent`,
+`CaptureReceipt`, `SourceStats`, and `RvxClient`. There are no old-name aliases,
+independent metric logging methods, or Push ingestion APIs. Hostmon keeps its
+independent producer implementation and does not acquire a RVX dependency.
+
+## Remote control client
+
+`RvxClient` manages hierarchy and Source registration against a running
+`rvx serve` daemon:
+
+```python
+from rvx import RvxClient
+
+client = RvxClient("http://rvx.example:9110")
+hierarchy = client.ensure_hierarchy(
+    "async-rl",
+    "training",
+    "trial-1",
+    config={"seed": 1},
+)
+client.register_source(
+    run_id=hierarchy["run"]["id"],
+    role="rollout-generation",
+    endpoint=source.endpoint,
+    rank=0,
+)
+```
+
+The client reads `RVX_API_TOKEN` by default, uses the public experiment-control
+HTTP API, and tolerates concurrent hierarchy creation by resolving the exact
+named object after a creation race.
 
 ## Read retained state
 

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from rvx import tracker as et
 
@@ -168,6 +168,19 @@ class TrackerSdkTests(unittest.TestCase):
         history = json.loads(run.history_bytes())
         self.assertEqual(history["snapshots"][0]["state"]["metrics"]["loss"], 0.5)
 
+    def test_tracker_accepts_a_role_specific_step_axis(self):
+        run = et.init(
+            project="demo",
+            name="axis",
+            run_id="axis",
+            step_axis="trainer/step",
+        )
+        et.log({"loss": 0.5}, step=7, commit=True)
+
+        snapshot = json.loads(run.latest_bytes())
+
+        self.assertEqual(snapshot["axes"], {"trainer/step": 7})
+
     def test_span_decorator_records_native_timing(self):
         run = et.init(project="demo", name="decorator", run_id="decorator")
 
@@ -179,6 +192,14 @@ class TrackerSdkTests(unittest.TestCase):
         et.log({})
         state = json.loads(run.latest_bytes())["state"]
         self.assertEqual(state["spans"][0]["name"], "work")
+
+    def test_span_exposes_completed_duration(self):
+        et.init(project="demo", name="duration", run_id="duration")
+
+        with et.span("work") as span:
+            pass
+
+        self.assertGreaterEqual(span.duration_ms, 0)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,9 @@ class AssetStagingTests(unittest.TestCase):
         self.assertEqual(cli.stat().st_mode & 0o777, 0o755)
         self.assertEqual(daemon.stat().st_mode & 0o777, 0o755)
         self.assertEqual((ui / "assets" / "app.js").read_text(), "fixture")
-        self.assertEqual((ui / "login" / "assets" / "login.js").read_text(), "login fixture")
+        self.assertEqual(
+            (ui / "login" / "assets" / "login.js").read_text(), "login fixture"
+        )
 
     def test_restage_prunes_obsolete_web_files(self):
         _, _, ui = package_assets.stage_assets(self.cli, self.daemon, self.ui)
@@ -92,7 +94,9 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertEqual(project["tool"]["maturin"]["data"], "rvx.data")
         self.assertEqual(project["tool"]["maturin"]["module-name"], "rvx._native")
         self.assertEqual(project["tool"]["maturin"]["python-source"], "src")
-        self.assertEqual(project["project"]["version"], cargo["workspace"]["package"]["version"])
+        self.assertEqual(
+            project["project"]["version"], cargo["workspace"]["package"]["version"]
+        )
         self.assertIn("rust/rvx-cli", cargo["workspace"]["members"])
         self.assertIn("rust/rvx-config", cargo["workspace"]["members"])
         self.assertIn("rust/rvx-tracker", cargo["workspace"]["members"])
@@ -104,6 +108,7 @@ class PackageMetadataTests(unittest.TestCase):
                 "_tracker_span.py",
                 "_tracker_values.py",
                 "adapters.py",
+                "client.py",
                 "config.py",
                 "errors.py",
                 "service.py",

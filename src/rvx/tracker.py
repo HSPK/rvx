@@ -12,7 +12,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
-from ._tracker_span import Span, reset_after_fork as reset_span_after_fork
+from ._tracker_span import Span
+from ._tracker_span import reset_after_fork as reset_span_after_fork
 from ._tracker_values import (
     alert_rule,
     current_rank,
@@ -23,6 +24,7 @@ from ._tracker_values import (
 
 if TYPE_CHECKING:
     from aiohttp.web import Application
+
     from .adapters import SourceASGI
 
 
@@ -85,6 +87,7 @@ class Run:
         capacity: int = 1_024,
         max_buffer_bytes: int = 64 * 1024 * 1024,
         history_steps: int = 1_024,
+        step_axis: str = "step",
         step_policy: str = "monotonic",
         span_count: bool = False,
         alert_window: int = 1_024,
@@ -139,7 +142,7 @@ class Run:
             "schema_version": 1,
         }
         options = {
-            "step_axis": "step",
+            "step_axis": step_axis,
             "history_steps": history_steps,
             "step_policy": step_policy,
             "span_count": span_count,
@@ -293,13 +296,17 @@ class Run:
             try:
                 import pandas as pd
             except ImportError as error:
-                raise ImportError('Install pandas with `uv add "rvx[pandas]"`') from error
+                raise ImportError(
+                    'Install pandas with `uv add "rvx[pandas]"`'
+                ) from error
             return pd.DataFrame(projected)
         if output_type == "polars":
             try:
                 import polars as pl
             except ImportError as error:
-                raise ImportError('Install polars with `uv add "rvx[polars]"`') from error
+                raise ImportError(
+                    'Install polars with `uv add "rvx[polars]"`'
+                ) from error
             return pl.DataFrame(projected)
         raise ValueError("output_type must be dict, pandas/pd, or polars")
 
@@ -440,8 +447,19 @@ def _require_run() -> Run:
     return _active_run
 
 
-def log(data: Mapping[str, Any], step: int | None = None, commit: bool | None = None):
-    _require_run().log(data, step=step, commit=commit)
+def log(
+    data: Mapping[str, Any],
+    step: int | None = None,
+    commit: bool | None = None,
+    *,
+    observed_at_ns: int | None = None,
+):
+    _require_run().log(
+        data,
+        step=step,
+        commit=commit,
+        observed_at_ns=observed_at_ns,
+    )
 
 
 def history(n: int | None = 50, **kwargs):
