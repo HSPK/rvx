@@ -109,13 +109,15 @@ impl Repository {
 
     pub fn create_experiment(&self, project_id: &str, name: &str) -> Result<Experiment> {
         rvx_core::validate_name("experiment name", name)?;
+        let connection = self.connection.lock();
+        require_parent(&connection, "projects", "project", project_id)?;
         let experiment = Experiment {
             id: new_id("experiment"),
             project_id: project_id.to_string(),
             name: name.trim().to_string(),
             created_at_ns: now_ns(),
         };
-        self.connection.lock().execute(
+        connection.execute(
             "INSERT INTO experiments(id, project_id, name, created_at_ns)
              VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -157,6 +159,8 @@ impl Repository {
         rvx_core::validate_name("run name", name)?;
         serde_json::from_str::<serde_json::Value>(config_json)
             .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+        let connection = self.connection.lock();
+        require_parent(&connection, "experiments", "experiment", experiment_id)?;
         let now = now_ns();
         let run = Run {
             id: new_id("run"),
@@ -167,7 +171,7 @@ impl Repository {
             created_at_ns: now,
             updated_at_ns: now,
         };
-        self.connection.lock().execute(
+        connection.execute(
             "INSERT INTO runs(
                 id, experiment_id, name, status, config_json,
                 created_at_ns, updated_at_ns
@@ -401,6 +405,7 @@ impl Repository {
 
     pub fn register_source(&self, source: &Source) -> Result<Source> {
         let connection = self.connection.lock();
+        require_parent(&connection, "runs", "run", &source.run_id)?;
         connection.execute(
             "INSERT INTO sources(
                 id, run_id, attempt_id, role, endpoint, node_id, rank, state,
@@ -657,6 +662,18 @@ impl Repository {
             )
             .optional()?)
     }
+}
+
+fn require_parent(connection: &Connection, table: &str, kind: &str, id: &str) -> Result<()> {
+    let exists: bool = connection.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?)"),
+        [id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(EngineError::InvalidInput(format!("unknown {kind}: {id}")));
+    }
+    Ok(())
 }
 
 fn source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {

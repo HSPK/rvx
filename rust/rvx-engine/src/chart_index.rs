@@ -10,10 +10,10 @@ pub(crate) const MAX_SOURCE_FIELDS: usize = 4096;
 const MAX_OBJECT_FIELDS: usize = 256;
 const MAX_DISCOVERY_NODES: usize = 8192;
 const MAX_CATALOG_REPORTERS: usize = 16_384;
-const INDEX_VERSION: i64 = 1;
+const INDEX_VERSION: i64 = 2;
 
 /// Only derived tables are rebuilt; raw snapshots, IDs, heads and cursors never change.
-pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
+pub(crate) fn initialize(connection: &mut Connection) -> Result<bool> {
     let tables: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN
          ('chart_index_meta','chart_fields','chart_values','chart_axes','chart_observations','chart_runs','chart_source_axes')",
@@ -28,7 +28,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     } else {
         None
     };
-    if version != Some(INDEX_VERSION) {
+    let rebuilt = version != Some(INDEX_VERSION);
+    if rebuilt {
         let tx = connection.transaction()?;
         tx.execute_batch(
             "DROP TABLE IF EXISTS chart_index_meta;
@@ -60,7 +61,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
              CREATE TABLE chart_source_axes(
                 run_id TEXT NOT NULL, source_id TEXT NOT NULL, name TEXT NOT NULL,
                 PRIMARY KEY(run_id,source_id,name));
-             INSERT INTO chart_index_meta VALUES (1,0);",
+             INSERT INTO chart_index_meta VALUES (2,0);",
         )?;
         tx.commit()?;
     }
@@ -100,7 +101,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             break;
         }
     }
-    Ok(())
+    Ok(rebuilt)
 }
 
 /// Derive sparse values and discovery coverage inside the caller's raw-snapshot transaction.
@@ -111,6 +112,10 @@ pub(crate) fn insert(
     source: &str,
     snapshot: &StateSnapshot,
 ) -> Result<()> {
+    if is_tracker_event(&snapshot.state)? {
+        tx.execute("UPDATE chart_index_meta SET last_id=?", [id])?;
+        return Ok(());
+    }
     let mut known = tx
         .prepare_cached("SELECT path FROM chart_fields WHERE run_id=? AND source_id=?")?
         .query_map(params![run, source], |row| row.get::<_, String>(0))?

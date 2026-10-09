@@ -1,0 +1,15 @@
+[package]
+name = "rvx-alert-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+parking_lot.workspace = true
+reqwest.workspace = true
+rvx-tracker = { path = "../rvx-tracker" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+httpdate = "1.0"

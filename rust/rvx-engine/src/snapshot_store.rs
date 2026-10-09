@@ -74,7 +74,18 @@ impl SnapshotStore {
             )?;
         }
         transaction.commit()?;
-        crate::chart_index::initialize(&mut connection)?;
+        let rebuilt = crate::chart_index::initialize(&mut connection)?;
+        // Heads are a projection too: rebuild from non-event observations after an index upgrade.
+        if rebuilt || !has_heads {
+            connection.execute_batch(
+            "DELETE FROM snapshot_heads WHERE snapshot_id NOT IN (SELECT snapshot_id FROM chart_observations);
+             INSERT INTO snapshot_heads(run_id,source_id,snapshot_id)
+             SELECT s.run_id,s.source_id,MAX(s.id) FROM snapshots s
+             JOIN chart_observations o ON o.snapshot_id=s.id GROUP BY s.run_id,s.source_id
+             ON CONFLICT(run_id,source_id) DO UPDATE SET snapshot_id=excluded.snapshot_id;"
+        )?;
+        }
+        crate::artifact_index::initialize(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -85,6 +96,38 @@ impl SnapshotStore {
             "SELECT next_sequence FROM snapshot_cursors WHERE source_id=?1 AND source_session_id=?2",
             params![source_id, session], |row| row.get(0),
         ).optional()?.unwrap_or(0))
+    }
+
+    pub fn persisted_cursor(
+        &self,
+        request: &PersistedCursorRequest,
+    ) -> Result<PersistedCursorResponse> {
+        check_ids(
+            &[
+                request.run_id.clone(),
+                request.source_id.clone(),
+                request.source_session_id.clone(),
+            ],
+            3,
+        )?;
+        if request.next_sequence > i64::MAX as u64 {
+            return invalid("cursor exceeds signed 64-bit range");
+        }
+        let connection = self.connection.lock();
+        let persisted: u64 = connection.query_row(
+            "SELECT next_sequence FROM snapshot_cursors WHERE source_id=? AND source_session_id=?",
+            params![request.source_id,request.source_session_id], |r| r.get(0)).optional()?.unwrap_or(0);
+        let gaps: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshot_gaps WHERE source_id=? AND source_session_id=? AND expected_sequence<?)",
+            params![request.source_id,request.source_session_id,request.next_sequence], |r| r.get(0))?;
+        Ok(PersistedCursorResponse {
+            run_id: request.run_id.clone(),
+            source_id: request.source_id.clone(),
+            source_session_id: request.source_session_id.clone(),
+            persisted_next_sequence: persisted,
+            complete: persisted >= request.next_sequence && !gaps,
+            has_gaps: gaps,
+        })
     }
 
     /// Validate the entire page before committing full objects, gaps, and its cursor together.
@@ -150,11 +193,14 @@ impl SnapshotStore {
             )?;
             let snapshot_id = tx.last_insert_rowid();
             crate::chart_index::insert(&tx, snapshot_id, &source.run_id, &source.id, snapshot)?;
-            tx.execute(
-                "INSERT INTO snapshot_heads(run_id,source_id,snapshot_id) VALUES (?1,?2,?3)
+            crate::artifact_index::insert(&tx, snapshot_id, &source.run_id, &source.id, snapshot)?;
+            if !rvx_core::is_tracker_event(&snapshot.state)? {
+                tx.execute(
+                    "INSERT INTO snapshot_heads(run_id,source_id,snapshot_id) VALUES (?1,?2,?3)
                  ON CONFLICT(run_id,source_id) DO UPDATE SET snapshot_id=excluded.snapshot_id",
-                params![source.run_id, source.id, snapshot_id],
-            )?;
+                    params![source.run_id, source.id, snapshot_id],
+                )?;
+            }
             accepted += 1;
         }
         if accepted > 0 && page.oldest_sequence > committed {
@@ -186,6 +232,20 @@ impl SnapshotStore {
             .connection
             .lock()
             .query_row("SELECT COUNT(*) FROM snapshot_gaps", [], |row| row.get(0))?)
+    }
+
+    pub fn artifact_lineage(
+        &self,
+        request: &ArtifactLineageRequest,
+    ) -> Result<ArtifactLineagePage> {
+        crate::artifact_index::lineage(&self.connection.lock(), request)
+    }
+
+    pub fn artifact_resolve(
+        &self,
+        request: &ArtifactResolveRequest,
+    ) -> Result<ArtifactResolveResponse> {
+        crate::artifact_index::resolve(&self.connection.lock(), request)
     }
 
     /// Return an unprojected observation for inspection; nonpositive and unknown storage IDs are errors.
@@ -422,13 +482,17 @@ impl SnapshotStore {
             "SELECT s.id,s.run_id,s.source_id,s.source_session_id,s.sequence,s.observed_at_ns,
                     r.first_observed_at_ns,a.value,c.exclusions_json,v.path,v.value
              FROM (SELECT id,run_id,source_id,source_session_id,sequence,observed_at_ns
-                   FROM snapshots s INDEXED BY snapshot_projection_order {} ORDER BY run_id,source_id,observed_at_ns,id LIMIT {}) s
+                   FROM snapshots s INDEXED BY snapshot_projection_order {} AND EXISTS
+                   (SELECT 1 FROM chart_observations co WHERE co.snapshot_id=s.id)
+                   ORDER BY run_id,source_id,observed_at_ns,id LIMIT {}) s
              JOIN chart_runs r ON r.run_id=s.run_id
              JOIN chart_observations c ON c.snapshot_id=s.id
              LEFT JOIN chart_axes a ON a.snapshot_id=s.id AND a.name=?
              LEFT JOIN chart_values v ON v.snapshot_id=s.id AND v.path IN ({placeholders})
              ORDER BY s.run_id,s.source_id,s.observed_at_ns,s.id,v.path",
-             filter.sql(), MAX_QUERY_SCAN_ROWS+1);
+            filter.sql(),
+            MAX_QUERY_SCAN_ROWS + 1
+        );
         let mut parameters = filter.values.clone();
         parameters.push(request.axis.clone().into());
         parameters.extend(request.paths.iter().cloned().map(SqlValue::Text));
@@ -1932,5 +1996,219 @@ mod tests {
                 ..history("run")
             })
             .is_err());
+    }
+
+    #[test]
+    fn artifact_lineage_is_indexed_paginated_and_resolved_by_alias() {
+        let dir = crate::test_directory().unwrap();
+        let store = SnapshotStore::open(&dir.path().join("snapshots.db")).unwrap();
+        let source = source("source", "run");
+        let snapshots = vec![
+            snapshot(
+                0,
+                json!({
+                    "tracker":{"step":0},
+                    "artifacts":[{
+                        "action":"log","name":"model","type":"checkpoint",
+                        "digest":"digest-a","size":10,"uri":"/tmp/a",
+                        "aliases":["best"],"metadata":{"epoch":1}
+                    }]
+                }),
+            ),
+            snapshot(
+                1,
+                json!({
+                    "tracker":{"step":1},
+                    "artifacts":[{
+                        "action":"log","name":"model","type":"checkpoint",
+                        "digest":"digest-b","size":20,"uri":"/tmp/b",
+                        "aliases":["new"],"metadata":{"epoch":2}
+                    }]
+                }),
+            ),
+        ];
+        assert_eq!(
+            store
+                .ingest(&source, &descriptor(&source, "session"), &page(snapshots))
+                .unwrap(),
+            2
+        );
+        let first = store
+            .artifact_lineage(&ArtifactLineageRequest {
+                run_ids: vec!["run".into()],
+                source_ids: vec![],
+                name: Some("model".into()),
+                digest: None,
+                action: Some(ArtifactAction::Log),
+                before: None,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(first.artifacts[0].record.digest, "digest-b");
+        let second = store
+            .artifact_lineage(&ArtifactLineageRequest {
+                run_ids: vec!["run".into()],
+                source_ids: vec![],
+                name: Some("model".into()),
+                digest: None,
+                action: None,
+                before: first.next_before,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(second.artifacts[0].record.digest, "digest-a");
+        assert_eq!(
+            store
+                .artifact_resolve(&ArtifactResolveRequest {
+                    run_ids: vec!["run".into()],
+                    source_ids: vec![],
+                    name: "model".into(),
+                    alias: "latest".into(),
+                })
+                .unwrap()
+                .artifact
+                .record
+                .digest,
+            "digest-b"
+        );
+        assert_eq!(
+            store
+                .artifact_resolve(&ArtifactResolveRequest {
+                    run_ids: vec!["run".into()],
+                    source_ids: vec![],
+                    name: "model".into(),
+                    alias: "best".into(),
+                })
+                .unwrap()
+                .artifact
+                .record
+                .digest,
+            "digest-a"
+        );
+    }
+
+    #[test]
+    fn events_are_durable_but_never_replace_heads_or_create_chart_points() {
+        let dir = crate::test_directory().unwrap();
+        let path = dir.path().join("events.db");
+        let store = SnapshotStore::open(&path).unwrap();
+        let source = source("s", "r");
+        let event = |seq| {
+            snapshot(
+                seq,
+                json!({
+                    "tracker":{"record_version":1,"kind":"event","step":0,"status":"running","commit":seq+1},
+                    "metrics":{},"artifacts":[]
+                }),
+            )
+        };
+        store
+            .ingest(
+                &source,
+                &descriptor(&source, "session"),
+                &page(vec![
+                    snapshot(0, json!({"metrics":{"loss":1}})),
+                    event(1),
+                    event(2),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            store.latest(&latest("r")).unwrap().snapshots[0]
+                .snapshot
+                .sequence,
+            0
+        );
+        assert_eq!(
+            store.query(&query("r", &["/metrics/loss"])).unwrap().series[0].values,
+            vec![Some(1.0)]
+        );
+        let ack = PersistedCursorRequest {
+            run_id: "r".into(),
+            source_id: "s".into(),
+            source_session_id: "session".into(),
+            next_sequence: 3,
+        };
+        assert!(store.persisted_cursor(&ack).unwrap().complete);
+        let future = PersistedCursorRequest {
+            next_sequence: 4,
+            ..ack.clone()
+        };
+        assert!(!store.persisted_cursor(&future).unwrap().complete);
+        let other = PersistedCursorRequest {
+            source_session_id: "other".into(),
+            ..ack.clone()
+        };
+        assert!(!store.persisted_cursor(&other).unwrap().complete);
+        drop(store);
+        let store = SnapshotStore::open(&path).unwrap();
+        assert!(store.persisted_cursor(&ack).unwrap().complete);
+        assert_eq!(
+            store.latest(&latest("r")).unwrap().snapshots[0]
+                .snapshot
+                .sequence,
+            0
+        );
+        store.connection.lock().execute(
+            "INSERT INTO snapshot_gaps(source_id,source_session_id,expected_sequence,oldest_sequence,observed_at_ns)
+             VALUES ('s','session',0,1,0)",[]).unwrap();
+        assert!(!store.persisted_cursor(&ack).unwrap().complete);
+        assert!(store.persisted_cursor(&ack).unwrap().has_gaps);
+    }
+
+    #[test]
+    fn artifact_coverage_and_composite_pagination_survive_index_rebuild() {
+        let dir = crate::test_directory().unwrap();
+        let path = dir.path().join("artifact-rebuild.db");
+        let store = SnapshotStore::open(&path).unwrap();
+        let source = source("s", "r");
+        let record = |name| {
+            json!({"record_version":1,"action":"log","name":name,"type":"model",
+            "digest":"hash","size":u64::MAX,"uri":"s3://bucket/model","aliases":["best"],"metadata":{}})
+        };
+        store.ingest(&source,&descriptor(&source,"session"),&page(vec![
+            snapshot(0,json!({"tracker":{"step":0},"artifacts":[record("a"),record("b"),{"record_version":99}]})),
+        ])).unwrap();
+        let request = ArtifactLineageRequest {
+            run_ids: vec!["r".into()],
+            source_ids: vec![],
+            name: None,
+            digest: None,
+            action: None,
+            before: None,
+            limit: 1,
+        };
+        let page1 = store.artifact_lineage(&request).unwrap();
+        assert_eq!(page1.artifacts[0].artifact_index, 1);
+        assert_eq!(page1.artifacts[0].record.size, u64::MAX);
+        assert!(!page1.coverage.complete);
+        assert_eq!(page1.coverage.excluded_records, 1);
+        let page2 = store
+            .artifact_lineage(&ArtifactLineageRequest {
+                before: page1.next_before.clone(),
+                ..request.clone()
+            })
+            .unwrap();
+        assert_eq!(page2.artifacts[0].artifact_index, 0);
+        assert!(page2.next_before.is_none());
+        assert!(store
+            .artifact_resolve(&ArtifactResolveRequest {
+                run_ids: vec!["r".into()],
+                source_ids: vec![],
+                name: "b".into(),
+                alias: "best".into(),
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("coverage"));
+        store
+            .connection
+            .lock()
+            .execute_batch("DROP TABLE artifact_aliases;")
+            .unwrap();
+        drop(store);
+        let store = SnapshotStore::open(&path).unwrap();
+        assert_eq!(store.artifact_lineage(&request).unwrap(), page1);
+        assert_eq!(store.count().unwrap(), 1);
     }
 }

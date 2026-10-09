@@ -50,7 +50,6 @@ class Span:
             return self
         stack = _stack.get()
         self._path = "/".join([*(name for _, name in stack), self.name])
-        _stack.set((*stack, (self._identity, self.name)))
         if self.run is not None:
             self._native_span = self.run._native.start_span_json(
                 self._path,
@@ -58,6 +57,7 @@ class Span:
             )
         else:
             self._fallback_started_ns = time.perf_counter_ns()
+        _stack.set((*stack, (self._identity, self.name)))
         return self
 
     def set(self, **attributes: Any) -> Span:
@@ -78,7 +78,10 @@ class Span:
                     None if error is None else type(error).__name__,
                 )
             )
-            return result["duration_ms"]
+            if result is not None and not result["result"]["accepted"]:
+                import warnings
+                warnings.warn(result["result"]["reason"], RuntimeWarning, stacklevel=2)
+            return 0.0 if result is None else result["duration_ms"]
         return (time.perf_counter_ns() - self._fallback_started_ns) / 1_000_000
 
     def __enter__(self) -> Span:

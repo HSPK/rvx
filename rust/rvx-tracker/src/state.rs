@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::alert::AlertEngine;
 use crate::{CommittedStep, Result, SpanRecord, StepPolicy, TrackerError, NONFINITE_KEY};
 
+#[derive(Clone)]
 pub(crate) struct TrackerState {
     pub(crate) status: &'static str,
     pub(crate) next_step: i64,
@@ -13,10 +15,18 @@ pub(crate) struct TrackerState {
     pub(crate) open_spans: Vec<SpanRecord>,
     pub(crate) last_committed_step: Option<i64>,
     pub(crate) summary: BTreeMap<String, Value>,
-    pub(crate) history: VecDeque<CommittedStep>,
+    pub(crate) history: VecDeque<HistoryEntry>,
+    pub(crate) history_bytes: usize,
+    pub(crate) evicted_steps: u64,
     pub(crate) commits: u64,
     pub(crate) alerts: AlertEngine,
     pub(crate) finished: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct HistoryEntry {
+    pub(crate) record: Arc<CommittedStep>,
+    pub(crate) bytes: usize,
 }
 
 pub(crate) enum StepDecision {

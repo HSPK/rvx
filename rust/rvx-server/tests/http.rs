@@ -12,10 +12,10 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-#[path = "http/tables.rs"]
-mod table_tests;
 #[path = "http/snapshot_views.rs"]
 mod snapshot_view_tests;
+#[path = "http/tables.rs"]
+mod table_tests;
 
 struct Server {
     url: String,
@@ -88,6 +88,51 @@ fn client() -> Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn unknown_registry_parents_are_input_errors_and_do_not_create_orphans() {
+    let fixture = Fixture::new();
+    let server = Server::start(fixture.router()).await;
+    let client = client();
+    for (path, input, parent) in [
+        (
+            "/api/experiments/experiments",
+            json!({"project_id":"missing","name":"orphan"}),
+            "project",
+        ),
+        (
+            "/api/experiments/runs",
+            json!({"experiment_id":"missing","name":"orphan","config":{}}),
+            "experiment",
+        ),
+        (
+            "/api/experiments/sources",
+            json!({
+                "run_id":"missing","attempt_id":"a","role":"worker","endpoint":"http://127.0.0.1:1"
+            }),
+            "run",
+        ),
+    ] {
+        let response = client
+            .post(format!("{}{path}", server.url))
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let error = response.json::<Value>().await.unwrap();
+        assert!(error["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("unknown {parent}")));
+    }
+    let stats = fixture.engine.stats().unwrap();
+    assert_eq!(
+        (stats.projects, stats.experiments, stats.runs, stats.sources),
+        (0, 0, 0, 0)
+    );
+    server.close().await;
 }
 
 #[tokio::test]

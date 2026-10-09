@@ -94,6 +94,7 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertEqual(project["tool"]["maturin"]["python-source"], "src")
         self.assertEqual(project["project"]["version"], cargo["workspace"]["package"]["version"])
         self.assertIn("rust/rvx-cli", cargo["workspace"]["members"])
+        self.assertIn("rust/rvx-alert-http", cargo["workspace"]["members"])
         self.assertIn("rust/rvx-config", cargo["workspace"]["members"])
         self.assertIn("rust/rvx-tracker", cargo["workspace"]["members"])
         self.assertEqual(extension["lib"]["name"], "_native")
@@ -101,6 +102,8 @@ class PackageMetadataTests(unittest.TestCase):
             {path.name for path in (ROOT / "src" / "rvx").glob("*.py")},
             {
                 "__init__.py",
+                "_json_values.py",
+                "_tracker_run.py",
                 "_tracker_span.py",
                 "_tracker_values.py",
                 "adapters.py",
@@ -121,6 +124,7 @@ class PackageMetadataTests(unittest.TestCase):
             "Cargo.lock",
             "rust/**/*.rs",
             "rust/rvx-cli/**/*.rs",
+            "rust/rvx-alert-http/**/*.rs",
             "rust/rvx-config/**/*.rs",
             "rust/rvx-tracker/**/*.rs",
             "rvx.data/scripts/rvx",

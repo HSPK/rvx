@@ -1,6 +1,9 @@
 mod client;
 mod render;
+#[cfg(test)]
+mod tests;
 
+use std::future::Future;
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -11,7 +14,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
@@ -59,31 +62,64 @@ async fn interactive(
     base_url: &str,
 ) -> Result<()> {
     let mut terminal = open_terminal()?;
-    let result = interactive_loop(&mut terminal, client, dashboard, base_url).await;
+    let result = interactive_loop(
+        &mut terminal,
+        dashboard,
+        base_url,
+        || client.refresh(),
+        poll_event,
+    )
+    .await;
     let cleanup = close_terminal(&mut terminal);
     result.and(cleanup)
 }
 
-async fn interactive_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    client: DashboardClient<'_>,
+async fn interactive_loop<B, F, R, P>(
+    terminal: &mut Terminal<B>,
     dashboard: &DashboardConfig,
     base_url: &str,
-) -> Result<()> {
+    refresh: F,
+    mut poll: P,
+) -> Result<()>
+where
+    B: Backend,
+    F: Fn() -> R,
+    R: Future<Output = Result<DashboardState>>,
+    P: FnMut() -> io::Result<Option<Event>>,
+{
     let mut state = DashboardState::waiting("Connecting to RVX.");
     let mut error = None;
     let mut next_refresh = Instant::now();
+    let mut pending = None;
+    let mut refresh_requested = false;
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut scroll: usize = 0;
     loop {
-        if Instant::now() >= next_refresh {
-            match client.refresh().await {
-                Ok(updated) => {
-                    state = updated;
-                    error = None;
+        if pending.is_none() && Instant::now() >= next_refresh {
+            pending = Some(Box::pin(refresh()));
+        }
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {}
+            result = async {
+                match pending.as_mut() {
+                    Some(request) => request.await,
+                    None => std::future::pending().await,
                 }
-                Err(failure) => error = Some(format!("{failure:#}")),
+            } => {
+                pending = None;
+                match result {
+                    Ok(updated) => { state = updated; error = None; }
+                    Err(failure) => error = Some(format!("{failure:#}")),
+                }
+                next_refresh = Instant::now() + if refresh_requested {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(dashboard.refresh_ms)
+                };
+                refresh_requested = false;
             }
-            next_refresh = Instant::now() + Duration::from_millis(dashboard.refresh_ms);
         }
         let size = terminal.size()?;
         let viewport = usize::from(size.height.saturating_sub(1)).max(1);
@@ -117,10 +153,7 @@ async fn interactive_loop(
                 areas[1],
             );
         })?;
-        if !event::poll(Duration::from_millis(100))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
+        let Some(Event::Key(key)) = poll()? else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -129,7 +162,13 @@ async fn interactive_loop(
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-            KeyCode::Char('r') => next_refresh = Instant::now(),
+            KeyCode::Char('r') => {
+                if pending.is_some() {
+                    refresh_requested = true;
+                } else {
+                    next_refresh = Instant::now();
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => scroll = (scroll + 1).min(maximum),
             KeyCode::Char('k') | KeyCode::Up => scroll = scroll.saturating_sub(1),
             KeyCode::PageDown | KeyCode::Char(' ') => scroll = (scroll + viewport).min(maximum),
@@ -138,6 +177,14 @@ async fn interactive_loop(
             KeyCode::Char('G') => scroll = maximum,
             _ => {}
         }
+    }
+}
+
+fn poll_event() -> io::Result<Option<Event>> {
+    if event::poll(Duration::ZERO)? {
+        event::read().map(Some)
+    } else {
+        Ok(None)
     }
 }
 

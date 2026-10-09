@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod artifacts;
+pub use artifacts::*;
+mod tracker;
+pub use tracker::*;
 mod snapshots;
 pub use snapshots::*;
 mod tables;

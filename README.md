@@ -75,6 +75,10 @@ et.log({"loss": 0.184}, step=1, commit=True)
 
 The tracker core, alert DSL/watchdog/delivery, span aggregation, and artifact
 lineage are Rust. See [the native tracker guide](docs/tracker.md).
+Tracker observations and events are explicitly separated: notifications cannot
+erase current metrics or create empty chart points. Use
+`run.finish(durable=True, server_url=..., source_id=..., timeout=30)` when a
+training process must wait for its final Source cursor to be persisted.
 
 For a training-focused terminal dashboard, one TOML file can bootstrap static
 Source registrations and define metric, current-snapshot, and Run-metadata

@@ -21,6 +21,7 @@ def check_wheel(path: Path, version: str, platform: str | None) -> None:
         required = {
             "rvx/__init__.py", "rvx/source.py", "rvx/adapters.py",
             "rvx/service.py", "rvx/config.py", "rvx/errors.py", "rvx/tracker.py",
+            "rvx/_json_values.py", "rvx/_tracker_run.py",
             "rvx/_tracker_span.py", "rvx/_tracker_values.py",
             f"{data}/scripts/rvx", f"{data}/scripts/rvxd",
             f"{web}/index.html", f"{web}/login/index.html",

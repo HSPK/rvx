@@ -45,6 +45,12 @@ pub struct AlertRule {
     #[serde(default = "one")]
     pub for_steps: u64,
     #[serde(default)]
+    pub for_duration_ms: u64,
+    #[serde(default)]
+    pub partial_window: bool,
+    #[serde(default)]
+    pub axis: RuleAxis,
+    #[serde(default)]
     pub cooldown_seconds: u64,
     #[serde(default)]
     pub max_fires: Option<u64>,
@@ -75,6 +81,9 @@ impl AlertRule {
             message,
             mode: AlertMode::Edge,
             for_steps: 1,
+            for_duration_ms: 0,
+            partial_window: false,
+            axis: RuleAxis::WallTime,
             cooldown_seconds: 0,
             max_fires: None,
             notify_recovery: false,
@@ -84,6 +93,13 @@ impl AlertRule {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleAxis {
+    #[default]
+    WallTime,
+    Step,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AlertEvent {
     pub rule: String,

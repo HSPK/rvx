@@ -90,6 +90,7 @@ pub enum ProducerError {
 
 pub type Result<T> = std::result::Result<T, ProducerError>;
 
+#[derive(Clone)]
 struct BufferedSnapshot {
     snapshot: Arc<StateSnapshot>,
     bytes: usize,
@@ -102,6 +103,7 @@ struct ProducerState {
     dropped_snapshots: u64,
     next_sequence: u64,
     sealed: bool,
+    latest_observation: Option<BufferedSnapshot>,
 }
 
 /// Thread-safe full-state history, independent of HTTP runtime ownership.
@@ -142,7 +144,7 @@ impl SnapshotProducer {
         if self.state.lock().sealed {
             return Err(ProducerError::Sealed);
         }
-        let batch_limit = MAX_BATCH_SNAPSHOTS.min(self.limits.max_snapshots);
+        let batch_limit = MAX_BATCH_SNAPSHOTS;
         if events.is_empty() || events.len() > batch_limit {
             return invalid(format!("batch size must be between 1 and {batch_limit}"));
         }
@@ -201,10 +203,22 @@ impl SnapshotProducer {
                 return invalid("snapshot exceeds 4 MiB including its assigned sequence");
             }
         }
+        let mut latest_bytes = state.latest_observation.as_ref().map_or(0, |s| s.bytes);
+        for (snapshot, bytes, _) in &prepared {
+            if rvx_core::is_tracker_event(&snapshot.state).map_err(input_error)? {
+                if latest_bytes + bytes > self.limits.max_bytes {
+                    return invalid("event plus current observation exceeds producer byte budget");
+                }
+            } else {
+                latest_bytes = *bytes;
+            }
+        }
         for (index, (mut snapshot, bytes, _)) in prepared.into_iter().enumerate() {
             snapshot.sequence = first_sequence + index as u64;
+            let is_event = rvx_core::is_tracker_event(&snapshot.state).map_err(input_error)?;
             while state.snapshots.len() >= self.limits.max_snapshots
-                || state.buffered_bytes + bytes > self.limits.max_bytes
+                || state.buffered_bytes + bytes + if is_event { pinned_bytes(&state) } else { 0 }
+                    > self.limits.max_bytes
             {
                 if let Some(removed) = state.snapshots.pop_front() {
                     state.buffered_bytes -= removed.bytes;
@@ -212,10 +226,14 @@ impl SnapshotProducer {
                 }
             }
             state.buffered_bytes += bytes;
-            state.snapshots.push_back(BufferedSnapshot {
+            let entry = BufferedSnapshot {
                 snapshot: Arc::new(snapshot),
                 bytes,
-            });
+            };
+            if !is_event {
+                state.latest_observation = Some(entry.clone());
+            }
+            state.snapshots.push_back(entry);
         }
         state.next_sequence = next_sequence;
         Ok(CaptureReceipt {
@@ -240,8 +258,8 @@ impl SnapshotProducer {
     pub fn latest(&self) -> Result<Arc<StateSnapshot>> {
         self.state
             .lock()
-            .snapshots
-            .back()
+            .latest_observation
+            .as_ref()
             .map(|entry| Arc::clone(&entry.snapshot))
             .ok_or(ProducerError::SnapshotUnavailable)
     }
@@ -333,7 +351,7 @@ impl SnapshotProducer {
         let state = self.state.lock();
         ProducerStats {
             buffered_snapshots: state.snapshots.len(),
-            buffered_bytes: state.buffered_bytes,
+            buffered_bytes: state.buffered_bytes + pinned_bytes(&state),
             dropped_snapshots: state.dropped_snapshots,
             oldest_sequence: oldest_sequence(&state),
             next_sequence: state.next_sequence,
@@ -354,6 +372,7 @@ impl SnapshotProducer {
             let mut state = self.state.lock();
             state.sealed = true;
             state.buffered_bytes = 0;
+            state.latest_observation = None;
             (std::mem::take(&mut state.snapshots), state.next_sequence)
         };
         // Release allocations outside the mutex; existing Arc readers remain valid.
@@ -381,6 +400,18 @@ impl SnapshotProducer {
             .layer(middleware::map_response(no_cache))
             .with_state(self)
     }
+}
+
+fn pinned_bytes(state: &ProducerState) -> usize {
+    state.latest_observation.as_ref().map_or(0, |entry| {
+        if state.snapshots.front().map_or(true, |front| {
+            entry.snapshot.sequence < front.snapshot.sequence
+        }) {
+            entry.bytes
+        } else {
+            0
+        }
+    })
 }
 
 fn oldest_sequence(state: &ProducerState) -> u64 {

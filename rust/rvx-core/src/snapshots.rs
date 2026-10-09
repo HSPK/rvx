@@ -285,6 +285,7 @@ pub fn validate_snapshot_descriptor(descriptor: &SnapshotDescriptor) -> Result<(
 }
 
 pub fn validate_state_snapshot(snapshot: &StateSnapshot) -> Result<()> {
+    crate::tracker_header(&snapshot.state)?;
     validate_name("source_session_id", &snapshot.source_session_id)?;
     if snapshot.source_session_id.len() > 4096 {
         return Err(ProtocolError::InvalidSnapshot(

@@ -1512,6 +1512,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rvx-alert-http"
+version = "0.3.0"
+dependencies = [
+ "httpdate",
+ "parking_lot",
+ "reqwest",
+ "rvx-tracker",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rvx-cli"
 version = "0.3.0"
 dependencies = [
@@ -1524,6 +1537,7 @@ dependencies = [
  "reqwest",
  "rvx-config",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "unicode-segmentation",
@@ -1575,6 +1589,8 @@ dependencies = [
  "axum",
  "parking_lot",
  "pyo3",
+ "reqwest",
+ "rvx-alert-http",
  "rvx-core",
  "rvx-engine",
  "rvx-snapshots",
@@ -1630,7 +1646,6 @@ name = "rvx-tracker"
 version = "0.3.0"
 dependencies = [
  "parking_lot",
- "reqwest",
  "rvx-core",
  "rvx-snapshots",
  "serde",

@@ -11,8 +11,10 @@ model checkpoint. Each Source has its own consistency boundary. Combining
 Sources by time does not imply a distributed atomic snapshot.
 
 The native step-oriented tracker follows this same contract rather than adding
-a metric store: each committed step is a complete Source snapshot with a
-logical `step` axis. See [Native experiment tracker](tracker.md).
+a metric store: committed steps are observations with a logical `step` axis.
+Versioned tracker event records share the retained history and sequence cursor
+but do not update observation heads or chart indexes. See [Native experiment
+tracker](tracker.md).
 
 ## Producer protocol
 
@@ -111,6 +113,12 @@ No scalar WAL/Parquet readers or legacy query APIs remain.
 
 ## Consumer APIs
 
+`POST /api/snapshots/ack` accepts `run_id`, `source_id`, `source_session_id`
+and the exclusive `next_sequence` to confirm. It reports the durable SQLite
+cursor, `complete`, and `has_gaps`; only a persisted prefix without retention
+gaps counts as complete. It uses the same authentication policy as other data
+APIs. Observation and event records both advance this persistence cursor.
+
 The charts-first interface uses the following current snapshot APIs. Obsolete
 scalar metric APIs, hostmon dashboard proxies, and compatibility routes are
 removed by this refactor. Authentication and same-origin protections remain.
@@ -188,6 +196,24 @@ not rounded before normalization. Constant fields use a uniform midpoint.
 Missing, null, nonnumeric and truncated cell values have an explicit
 unavailable-shading marker instead of being treated as zero. Omitting
 `shadePath` restores state-only color without changing the snapshot data.
+
+### Artifact lineage APIs
+
+Tracker snapshots may contain `state.artifacts` observations. RVX derives a
+rebuildable index atomically with snapshot ingestion:
+
+- `POST /api/artifacts/lineage` returns bounded production/consumption records
+  filtered by Run, Source, name, digest, or action.
+- `POST /api/artifacts/resolve` resolves the newest logged artifact matching a
+  name and `latest` or explicit alias.
+
+Pagination uses the pair `{snapshot_id, artifact_index}` so multiple artifact
+records in one snapshot cannot be skipped. Raw snapshots remain authoritative;
+dropping the index and rebuilding it does not change artifact evidence or IDs.
+The index stores metadata, digests, aliases and URIs, never artifact content.
+Lineage responses include `{complete, excluded_records}` coverage for the
+Run/Source scope. Malformed historical artifact records are accounted as
+exclusions, not silently omitted; alias resolution fails for incomplete scopes.
 
 ### `POST /api/snapshots/aggregate`
 

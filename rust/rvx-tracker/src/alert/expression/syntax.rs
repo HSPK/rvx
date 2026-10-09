@@ -16,6 +16,86 @@ pub(crate) enum Expr {
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 
+impl Expr {
+    pub(crate) fn validate(&self, capacity: usize) -> Result<(), TrackerError> {
+        match self {
+            Self::Metric(name, window) => {
+                if name.is_empty() || name.len() > 4096 {
+                    return Err(TrackerError::InvalidInput(
+                        "invalid alert metric name".into(),
+                    ));
+                }
+                if matches!(window, Some(Window::Points(points)) if *points > capacity) {
+                    return Err(TrackerError::InvalidInput(
+                        "rule window exceeds alert_window".into(),
+                    ));
+                }
+            }
+            Self::Unary(_, value) => value.validate(capacity)?,
+            Self::Binary(_, left, right) => {
+                left.validate(capacity)?;
+                right.validate(capacity)?;
+            }
+            Self::Call(name, args) => {
+                let valid_arity = match name.as_str() {
+                    "step" | "elapsed" => args.is_empty(),
+                    "ema" | "stalled" => (1..=2).contains(&args.len()),
+                    "mean" | "std" | "var" | "median" | "sum" | "min" | "max" | "first"
+                    | "last" | "count" | "diff" | "rate" | "pct_change" | "slope" | "zscore"
+                    | "increasing" | "decreasing" | "isnan" | "isinf" | "has" | "age"
+                    | "no_data" => args.len() == 1,
+                    _ => {
+                        return Err(TrackerError::InvalidInput(format!(
+                            "unknown alert function {name:?}"
+                        )))
+                    }
+                };
+                if !valid_arity {
+                    return Err(TrackerError::InvalidInput(format!(
+                        "invalid arity for {name}"
+                    )));
+                }
+                if matches!(name.as_str(), "has" | "age")
+                    && !matches!(args.first(), Some(Self::Metric(_, None)))
+                {
+                    return Err(TrackerError::InvalidInput(format!(
+                        "{name} requires a metric name"
+                    )));
+                }
+                if matches!(name.as_str(), "rate" | "slope")
+                    && !matches!(args.first(), Some(Self::Metric(_, Some(_))))
+                {
+                    return Err(TrackerError::InvalidInput(format!(
+                        "{name} requires a metric window"
+                    )));
+                }
+                if name == "no_data"
+                    && !matches!(args.first(),
+                    Some(Self::Duration(n)) if *n > 0)
+                    && !matches!(args.first(), Some(Self::Number(n)) if *n > 0.0 && n.is_finite())
+                {
+                    return Err(TrackerError::InvalidInput(
+                        "no_data requires a positive duration".into(),
+                    ));
+                }
+                if name == "diff"
+                    && capacity < 2
+                    && matches!(args.first(), Some(Self::Metric(_, None)))
+                {
+                    return Err(TrackerError::InvalidInput(
+                        "diff(metric) requires alert_window >= 2".into(),
+                    ));
+                }
+                for arg in args {
+                    arg.validate(capacity)?;
+                }
+            }
+            Self::Number(_) | Self::Duration(_) => {}
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum UnaryOp {
     Neg,
@@ -83,6 +163,11 @@ impl<'a> Lexer<'a> {
             let token = self.next_token()?;
             let end = token == Token::End;
             tokens.push(token);
+            if tokens.len() > 256 {
+                return Err(TrackerError::InvalidInput(
+                    "alert expression exceeds 256 tokens".into(),
+                ));
+            }
             if end {
                 return Ok(tokens);
             }
@@ -156,6 +241,11 @@ impl<'a> Lexer<'a> {
         let number: f64 = self.input[start..self.index]
             .parse()
             .map_err(|_| TrackerError::InvalidInput("invalid alert number".into()))?;
+        if !number.is_finite() {
+            return Err(TrackerError::InvalidInput(
+                "alert number must be finite".into(),
+            ));
+        }
         let unit_start = self.index;
         while self.peek().is_some_and(|value| value.is_ascii_alphabetic()) {
             self.index += 1;
@@ -178,6 +268,11 @@ impl<'a> Lexer<'a> {
                 )))
             }
         };
+        if number * multiplier > i64::MAX as f64 {
+            return Err(TrackerError::InvalidInput(
+                "alert duration overflows i64".into(),
+            ));
+        }
         Ok(Token::Duration((number * multiplier) as i64))
     }
 
@@ -253,6 +348,11 @@ pub(crate) struct Parser {
 
 impl Parser {
     pub(crate) fn parse(input: &str) -> Result<Expr, TrackerError> {
+        if input.len() > 8192 {
+            return Err(TrackerError::InvalidInput(
+                "alert expression exceeds 8192 bytes".into(),
+            ));
+        }
         let mut parser = Self {
             tokens: Lexer::new(input).tokens()?,
             index: 0,
@@ -279,15 +379,23 @@ impl Parser {
     }
 
     fn and_expression(&mut self) -> Result<Expr, TrackerError> {
-        let mut expression = self.comparison()?;
+        let mut expression = self.not_expression()?;
         while self.take(&Token::And) {
             expression = Expr::Binary(
                 BinaryOp::And,
                 Box::new(expression),
-                Box::new(self.comparison()?),
+                Box::new(self.not_expression()?),
             );
         }
         Ok(expression)
+    }
+
+    fn not_expression(&mut self) -> Result<Expr, TrackerError> {
+        if self.take(&Token::Not) {
+            Ok(Expr::Unary(UnaryOp::Not, Box::new(self.not_expression()?)))
+        } else {
+            self.comparison()
+        }
     }
 
     fn comparison(&mut self) -> Result<Expr, TrackerError> {
@@ -350,7 +458,6 @@ impl Parser {
         let operation = match self.current() {
             Token::Minus => Some(UnaryOp::Neg),
             Token::Plus => Some(UnaryOp::Pos),
-            Token::Not => Some(UnaryOp::Not),
             _ => None,
         };
         if let Some(operation) = operation {
@@ -383,7 +490,7 @@ impl Parser {
                             self.expect(&Token::Comma)?;
                         }
                     }
-                    Expr::Call(name, arguments)
+                    Expr::Call(name.to_ascii_lowercase(), arguments)
                 } else {
                     Expr::Metric(name, None)
                 }

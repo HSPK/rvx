@@ -182,6 +182,18 @@ class RvxService:
         """Compare two stored states, distinguishing absent fields from null."""
         return self._snapshot_read("snapshot_diff", payload)
 
+    def artifact_lineage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Query bounded artifact production/consumption records."""
+        return self._snapshot_read("artifact_lineage", payload)
+
+    def artifact_resolve(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Resolve the newest matching artifact name and alias."""
+        return self._snapshot_read("artifact_resolve", payload)
+
+    def persisted_cursor(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Read the durable cursor of an explicitly registered Source session."""
+        return self._snapshot_read("persisted_cursor", payload)
+
     def _snapshot_read(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Issue one coarse native read and preserve the shared response shape."""
         return self._decode(getattr(self._require(), method)(

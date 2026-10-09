@@ -20,12 +20,12 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use rvx_core::{
-    ChartCatalogRequest, RunStatus, SnapshotDiffRequest, SnapshotHistoryRequest,
-    SnapshotLatestRequest, SnapshotQueryRequest, SourceRegistration, SourceState,
-    TableCatalogRequest, TableRowsRequest, TableSummaryRequest,
+    ArtifactLineageRequest, ArtifactResolveRequest, ChartCatalogRequest, RunStatus,
+    SnapshotDiffRequest, SnapshotHistoryRequest, SnapshotLatestRequest, SnapshotQueryRequest,
+    SourceRegistration, SourceState, TableCatalogRequest, TableRowsRequest, TableSummaryRequest,
 };
-use rvx_engine::{Engine, EngineError, TableReadControl};
 use rvx_core::{SnapshotAggregateRequest, SnapshotRecordsRequest};
+use rvx_engine::{Engine, EngineError, TableReadControl};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
@@ -202,11 +202,14 @@ pub fn application_with_access_and_connections(
         )
         .route("/api/experiments/sources/:source_id", patch(update_source))
         .route("/api/charts/catalog", post(chart_catalog))
+        .route("/api/artifacts/lineage", post(artifact_lineage))
+        .route("/api/artifacts/resolve", post(artifact_resolve))
         .route("/api/tables/summary", post(table_summary))
         .route("/api/tables/catalog", post(table_catalog))
         .route("/api/tables/rows", post(table_rows))
         .route("/api/snapshots/:id", get(snapshot_get))
         .route("/api/snapshots/latest", post(snapshot_latest))
+        .route("/api/snapshots/ack", post(persisted_cursor))
         .route("/api/snapshots/history", post(snapshot_history))
         .route("/api/snapshots/query", post(snapshot_query))
         .route("/api/snapshots/diff", post(snapshot_diff))
@@ -214,7 +217,10 @@ pub fn application_with_access_and_connections(
         .route("/api/snapshots/records", post(snapshot_records));
     Ok(router
         .fallback(delivery::not_found)
-        .layer(middleware::from_fn_with_state(auth.clone(), access::protect))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            access::protect,
+        ))
         // Route templates omit credentials that callers might place in URLs, headers, or bodies.
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::extract::Request| {
@@ -363,6 +369,42 @@ async fn chart_catalog(
     blocking(move || Ok(serde_json::to_value(state.engine.chart_catalog(&request)?)?)).await
 }
 
+async fn artifact_lineage(
+    State(state): State<AppState>,
+    Json(request): Json<ArtifactLineageRequest>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || {
+        Ok(serde_json::to_value(
+            state.engine.artifact_lineage(&request)?,
+        )?)
+    })
+    .await
+}
+
+async fn artifact_resolve(
+    State(state): State<AppState>,
+    Json(request): Json<ArtifactResolveRequest>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || {
+        Ok(serde_json::to_value(
+            state.engine.artifact_resolve(&request)?,
+        )?)
+    })
+    .await
+}
+
+async fn persisted_cursor(
+    State(state): State<AppState>,
+    Json(request): Json<rvx_core::PersistedCursorRequest>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || {
+        Ok(serde_json::to_value(
+            state.engine.persisted_cursor(&request)?,
+        )?)
+    })
+    .await
+}
+
 /// Resolve storage IDs to flattened raw observations while retaining chart-point provenance.
 async fn snapshot_get(
     State(state): State<AppState>,
@@ -459,9 +501,14 @@ async fn snapshot_aggregate(
     request: Result<Json<SnapshotAggregateRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let Json(request) = request.map_err(table_json_error)?;
-    table_blocking(move |control| Ok(serde_json::to_value(
-        state.engine.snapshot_aggregate_controlled(&request, &control)?,
-    )?)).await
+    table_blocking(move |control| {
+        Ok(serde_json::to_value(
+            state
+                .engine
+                .snapshot_aggregate_controlled(&request, &control)?,
+        )?)
+    })
+    .await
 }
 
 async fn snapshot_records(
@@ -469,9 +516,14 @@ async fn snapshot_records(
     request: Result<Json<SnapshotRecordsRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let Json(request) = request.map_err(table_json_error)?;
-    table_blocking(move |control| Ok(serde_json::to_value(
-        state.engine.snapshot_records_controlled(&request, &control)?,
-    )?)).await
+    table_blocking(move |control| {
+        Ok(serde_json::to_value(
+            state
+                .engine
+                .snapshot_records_controlled(&request, &control)?,
+        )?)
+    })
+    .await
 }
 
 struct CancelTableOnDrop(TableReadControl);

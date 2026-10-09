@@ -1,10 +1,14 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use rvx_snapshots::SnapshotEvent;
 use serde_json::{json, Value};
 
 use crate::state::is_nonfinite;
-use crate::{AlertEvent, ArtifactRecord, CommittedStep, SpanRecord, TrackerOptions};
+use crate::state::{HistoryEntry, TrackerState};
+use crate::{
+    AlertEvent, ArtifactRecord, CommittedStep, Result, SpanRecord, TrackerError, TrackerOptions,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn snapshot_event(
@@ -19,6 +23,7 @@ pub(crate) fn snapshot_event(
     status: &str,
     commits: u64,
     options: &TrackerOptions,
+    kind: rvx_core::TrackerRecordKind,
 ) -> SnapshotEvent {
     let nonfinite: Vec<_> = metrics
         .iter()
@@ -30,6 +35,8 @@ pub(crate) fn snapshot_event(
             "summary": summary,
             "config": config,
             "tracker": {
+                "record_version": rvx_core::TRACKER_RECORD_VERSION,
+                "kind": kind,
                 "step": step,
                 "status": status,
                 "commit": commits,
@@ -45,25 +52,48 @@ pub(crate) fn snapshot_event(
 }
 
 pub(crate) fn merge_history(
-    history: &mut VecDeque<CommittedStep>,
+    state: &mut TrackerState,
     record: CommittedStep,
-    capacity: usize,
-) {
-    if let Some(existing) = history
-        .iter_mut()
-        .rev()
-        .find(|value| value.step == record.step)
-    {
+    options: &TrackerOptions,
+) -> Result<()> {
+    let mut record = record;
+    let existing_position = state
+        .history
+        .iter()
+        .position(|entry| entry.record.step == record.step);
+    if let Some(position) = existing_position {
+        let mut existing = (*state.history[position].record).clone();
         existing.metrics.extend(record.metrics);
         existing.summary = record.summary;
         existing.alerts.extend(record.alerts);
         existing.spans.extend(record.spans);
         existing.artifacts.extend(record.artifacts);
         existing.observed_at_ns = existing.observed_at_ns.max(record.observed_at_ns);
-    } else {
-        history.push_back(record);
+        record = existing;
     }
-    while history.len() > capacity {
-        history.pop_front();
+    let bytes = serde_json::to_vec(&record)?.len();
+    if bytes > options.max_history_bytes {
+        return Err(TrackerError::InvalidInput(
+            "committed step exceeds history byte budget".into(),
+        ));
     }
+    if let Some(position) = existing_position {
+        if let Some(old) = state.history.remove(position) {
+            state.history_bytes -= old.bytes;
+        }
+    }
+    state.history_bytes += bytes;
+    state.history.push_back(HistoryEntry {
+        record: Arc::new(record),
+        bytes,
+    });
+    while state.history.len() > options.history_steps
+        || state.history_bytes > options.max_history_bytes
+    {
+        if let Some(old) = state.history.pop_front() {
+            state.history_bytes -= old.bytes;
+            state.evicted_steps += 1;
+        }
+    }
+    Ok(())
 }

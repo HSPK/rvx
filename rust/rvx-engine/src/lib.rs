@@ -1,3 +1,4 @@
+mod artifact_index;
 mod auth_sessions;
 mod chart_index;
 mod repository;
@@ -16,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvx_core::{
-    new_id, now_ns, validate_snapshot_descriptor, ChartCatalogRequest, ChartCatalogResponse,
+    new_id, now_ns, validate_snapshot_descriptor, ArtifactLineagePage, ArtifactLineageRequest,
+    ArtifactResolveRequest, ArtifactResolveResponse, ChartCatalogRequest, ChartCatalogResponse,
     EngineStats, Experiment, Project, Run, RunStatus, SnapshotDescriptor, SnapshotDiffRequest,
     SnapshotDiffResponse, SnapshotHistoryPage, SnapshotHistoryRequest, SnapshotHistoryResponse,
     SnapshotLatestRequest, SnapshotLatestResponse, SnapshotQueryRequest, SnapshotQueryResponse,
@@ -355,6 +357,33 @@ impl Engine {
 
     pub fn snapshot_diff(&self, request: &SnapshotDiffRequest) -> Result<SnapshotDiffResponse> {
         self.snapshots.diff(request)
+    }
+
+    pub fn artifact_lineage(
+        &self,
+        request: &ArtifactLineageRequest,
+    ) -> Result<ArtifactLineagePage> {
+        self.snapshots.artifact_lineage(request)
+    }
+
+    pub fn artifact_resolve(
+        &self,
+        request: &ArtifactResolveRequest,
+    ) -> Result<ArtifactResolveResponse> {
+        self.snapshots.artifact_resolve(request)
+    }
+
+    pub fn persisted_cursor(
+        &self,
+        request: &rvx_core::PersistedCursorRequest,
+    ) -> Result<rvx_core::PersistedCursorResponse> {
+        let source = self.repository.source_by_id(&request.source_id)?.source;
+        if source.run_id != request.run_id {
+            return Err(EngineError::InvalidInput(
+                "acknowledgment Source does not belong to Run".into(),
+            ));
+        }
+        self.snapshots.persisted_cursor(request)
     }
 
     /// Pull the versioned snapshot protocol.

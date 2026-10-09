@@ -95,7 +95,7 @@ fn releasing_history_preserves_session_counters_and_in_flight_readers() {
     let descriptor = producer.descriptor_bytes().unwrap();
     let latest = producer.latest().unwrap();
     let selected = producer.select_history(0, 64).unwrap();
-    assert_eq!(Arc::strong_count(&latest), 3);
+    assert_eq!(Arc::strong_count(&latest), 4);
     assert_eq!(producer.seal_and_release_history(), 3);
     assert_eq!(producer.seal_and_release_history(), 3);
     assert_eq!(producer.descriptor_bytes().unwrap(), descriptor);

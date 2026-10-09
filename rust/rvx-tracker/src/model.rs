@@ -23,6 +23,13 @@ pub struct TrackerOptions {
     pub span_count: bool,
     pub alert_window: usize,
     pub watchdog_interval_ms: u64,
+    pub max_state_bytes: usize,
+    pub max_history_bytes: usize,
+    pub max_metrics: usize,
+    pub max_spans: usize,
+    pub max_alert_series_bytes: usize,
+    pub delivery_queue_capacity: usize,
+    pub shutdown_timeout_ms: u64,
 }
 
 impl Default for TrackerOptions {
@@ -34,6 +41,13 @@ impl Default for TrackerOptions {
             span_count: false,
             alert_window: 1_024,
             watchdog_interval_ms: 30_000,
+            max_state_bytes: 8 * 1024 * 1024,
+            max_history_bytes: 64 * 1024 * 1024,
+            max_metrics: 4096,
+            max_spans: 4096,
+            max_alert_series_bytes: 64 * 1024 * 1024,
+            delivery_queue_capacity: 1024,
+            shutdown_timeout_ms: 5000,
         }
     }
 }
@@ -62,6 +76,21 @@ impl TrackerOptions {
         {
             return Err(TrackerError::InvalidInput(
                 "watchdog_interval_ms must be zero or between 100 and 3600000".into(),
+            ));
+        }
+        if self.max_state_bytes == 0
+            || self.max_state_bytes > 64 * 1024 * 1024
+            || self.max_history_bytes == 0
+            || self.max_history_bytes > 1024 * 1024 * 1024
+            || self.max_alert_series_bytes == 0
+            || self.max_alert_series_bytes > 1024 * 1024 * 1024
+            || !(1..=100_000).contains(&self.max_metrics)
+            || !(1..=100_000).contains(&self.max_spans)
+            || !(1..=100_000).contains(&self.delivery_queue_capacity)
+            || !(1..=60_000).contains(&self.shutdown_timeout_ms)
+        {
+            return Err(TrackerError::InvalidInput(
+                "invalid tracker byte/cardinality/lifecycle budget".into(),
             ));
         }
         Ok(())
@@ -110,4 +139,37 @@ pub struct TrackerInfo {
     pub history_steps: usize,
     pub summary_fields: usize,
     pub has_time_alerts: bool,
+    pub history_bytes: usize,
+    pub evicted_steps: u64,
+    pub accepted_next_sequence: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryQuery {
+    pub limit: Option<usize>,
+    pub metrics: Option<Vec<String>>,
+    pub from_step: Option<i64>,
+    pub to_step: Option<i64>,
+    pub include_meta: bool,
+    pub include_open: bool,
+    pub fill_missing: bool,
+    pub dropna: bool,
+    pub max_bytes: usize,
+}
+
+impl Default for HistoryQuery {
+    fn default() -> Self {
+        Self {
+            limit: Some(50),
+            metrics: None,
+            from_step: None,
+            to_step: None,
+            include_meta: true,
+            include_open: true,
+            fill_missing: false,
+            dropna: false,
+            max_bytes: 16 * 1024 * 1024,
+        }
+    }
 }

@@ -66,12 +66,9 @@ class TrackerSdkTests(unittest.TestCase):
         )
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            try:
-                state = json.loads(run.latest_bytes())["state"]
-            except RuntimeError:
-                time.sleep(0.02)
-                continue
-            if state["alerts"]:
+            records = json.loads(run.history_bytes())["snapshots"]
+            if records and records[-1]["state"]["alerts"]:
+                state = records[-1]["state"]
                 break
             time.sleep(0.02)
         else:
@@ -144,7 +141,7 @@ class TrackerSdkTests(unittest.TestCase):
             path = Path(directory) / "checkpoint.bin"
             path.write_bytes(b"weights")
             et.log_artifact(path, name="model", type="checkpoint", aliases=["best"])
-        state = json.loads(run.latest_bytes())["state"]
+        state = json.loads(run.history_bytes())["snapshots"][-1]["state"]
         artifact = state["artifacts"][0]
         self.assertEqual(artifact["action"], "log")
         self.assertEqual(artifact["name"], "model")
@@ -179,6 +176,206 @@ class TrackerSdkTests(unittest.TestCase):
         et.log({})
         state = json.loads(run.latest_bytes())["state"]
         self.assertEqual(state["spans"][0]["name"], "work")
+
+    def test_history_filters_and_open_patch_are_native_and_bounded(self):
+        run = et.Run(project="p", name="history", watchdog_interval_ms=0)
+        try:
+            run.log({"loss": 1, "large": "x" * 10000}, step=2, commit=True)
+            run.log({"lr": 0.1}, step=2, commit=False)
+            rows = run.history(1, metrics=["loss", "lr"], max_bytes=256)
+            self.assertEqual(rows[0]["loss"], 1)
+            self.assertEqual(rows[0]["lr"], 0.1)
+            self.assertNotIn("lr", run.history(1, include_open=False)[0])
+            self.assertEqual(run.history(0), [])
+            with self.assertRaisesRegex(RuntimeError, "byte budget"):
+                run.history(1, max_bytes=256, include_open=False)
+        finally:
+            run.close()
+
+    def test_unsupported_compatibility_options_fail_instead_of_being_ignored(self):
+        for options in ({"dir": "unused"}, {"backends": ["wandb"]}, {"resume": True}):
+            with self.subTest(options=options), self.assertRaises(NotImplementedError):
+                et.Run(project="p", **options)
+        run = et.Run(project="p", name="unsupported")
+        try:
+            with self.assertRaises(NotImplementedError):
+                run.define_metric("loss")
+            with self.assertRaises(ValueError):
+                run.finish(durable=True)
+            self.assertEqual(run.info()["status"], "running")
+        finally:
+            run.close()
+
+    def test_explicit_replay_shares_live_rule_contract(self):
+        rules = ["mean(loss[3]) > 0 => warning: enough"]
+        inputs = [{"kind": "step", "step": i, "observed_at_ns": i + 1,
+                   "metrics": {"loss": 1}} for i in range(3)]
+        self.assertEqual(et.replay_alerts(rules, inputs[:2]), [])
+        self.assertEqual(et.replay_alerts(rules, inputs)[0]["step"], 2)
+
+    def test_http_channels_are_isolated_and_shutdown_cancels_inflight_requests(self):
+        fast_received = threading.Event()
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+
+        class Slow(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                slow_started.set()
+                release_slow.wait(5)
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        class Fast(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                fast_received.set()
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Slow) as slow, ThreadingHTTPServer(("127.0.0.1", 0), Fast) as fast:
+            threads = [threading.Thread(target=server.serve_forever) for server in (slow, fast)]
+            for thread in threads:
+                thread.start()
+            run = et.Run(project="p", name="isolation", shutdown_timeout_ms=100,
+                         alert={"channels": [
+                             {"name": "slow", "url": f"http://127.0.0.1:{slow.server_port}"},
+                             {"name": "fast", "url": f"http://127.0.0.1:{fast.server_port}"},
+                         ], "timeout_seconds": 5, "max_retries": 0})
+            try:
+                run.alert("notice", "isolation")
+                self.assertTrue(slow_started.wait(2))
+                self.assertTrue(fast_received.wait(1), "slow channel blocked fast delivery")
+                started = time.monotonic()
+                result = run.finish()
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertGreaterEqual(result["delivery"]["transport"]["accepted"], 2)
+            finally:
+                release_slow.set()
+                run.close()
+                for server in (slow, fast):
+                    server.shutdown()
+                for thread in threads:
+                    thread.join(3)
+
+    def test_durable_confirmation_timeout_gaps_and_wrong_identity_are_errors(self):
+        run = et.Run(project="p", name="durability", watchdog_interval_ms=0)
+        run.log({"loss": 1})
+        response = {
+            "run_id": run.id, "source_id": "source", "source_session_id": run.source_session_id,
+            "persisted_next_sequence": 0, "complete": False, "has_gaps": False,
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                body = json.dumps(response).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                kwargs = {"server_url": f"http://127.0.0.1:{server.server_port}", "source_id": "source"}
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    run.wait_persisted(**kwargs, timeout=0.05)
+                response.update(has_gaps=True, persisted_next_sequence=1, complete=False)
+                with self.assertRaisesRegex(RuntimeError, "gaps"):
+                    run.wait_persisted(**kwargs)
+                response.update(has_gaps=False, complete=True, source_session_id="other")
+                with self.assertRaisesRegex(RuntimeError, "identity"):
+                    run.wait_persisted(**kwargs)
+                response.update(source_session_id=run.source_session_id)
+                self.assertTrue(run.wait_persisted(**kwargs)["complete"])
+            finally:
+                run.close()
+                server.shutdown()
+                thread.join(3)
+
+    def test_shared_encoder_rejects_cyclic_dataclass_conversion(self):
+        from dataclasses import dataclass
+        from rvx._tracker_values import json_value
+
+        @dataclass
+        class Node:
+            value: object = None
+
+        node = Node()
+        node.value = node
+        with self.assertRaisesRegex(ValueError, "circular"):
+            json_value(node)
+
+    def test_failed_http_attempt_is_not_deduplicated_as_delivered(self):
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append(time.monotonic())
+                self.send_response(503 if len(requests) == 1 else 204)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            run = et.Run(project="p", name="retry", alert={
+                "channels": [{"name": "test", "url": f"http://127.0.0.1:{server.server_port}"}],
+                "max_retries": 0, "dedup_window_seconds": 300,
+            })
+            try:
+                run.alert("same", "same")
+                run.alert("same", "same")
+                result = run.finish()
+                self.assertEqual(len(requests), 2)
+                self.assertEqual(result["delivery"]["transport"]["failed"], 1)
+            finally:
+                run.close()
+                server.shutdown()
+                thread.join(3)
+
+    def test_native_history_and_working_state_budgets_are_observable(self):
+        run = et.Run(project="p", name="budgets", max_history_bytes=700, max_metrics=1)
+        try:
+            for step in range(10):
+                run.log({"loss": step})
+            self.assertLessEqual(run.info()["history_bytes"], 700)
+            self.assertGreater(run.info()["evicted_steps"], 0)
+            before = run.info()
+            with self.assertRaisesRegex(RuntimeError, "cardinality"):
+                run.log({"other": 1})
+            self.assertEqual(before, run.info())
+        finally:
+            run.close()
+
+    def test_step_reports_the_target_of_the_next_implicit_log(self):
+        run = et.Run(project="p", name="step-cursor", step_policy="allow", watchdog_interval_ms=0)
+        try:
+            run.log({"loss": 1}, step=10, commit=False)
+            self.assertEqual(run.step, 10)
+            self.assertEqual(run.log({"lr": 0.1})["step"], 10)
+            self.assertEqual(run.step, 11)
+            run.log({"loss": 2}, step=3, commit=False)
+            self.assertEqual(run.step, 3)
+            self.assertEqual(run.info()["next_step"], 11)
+            self.assertEqual(run.log({"lr": 0.2})["step"], 3)
+            self.assertEqual(run.step, 11)
+        finally:
+            run.close()
 
 
 if __name__ == "__main__":

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import math
 import socket
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from numbers import Integral
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
+
+from ._json_values import normalize_json
 
 if TYPE_CHECKING:
     from aiohttp.web import Application
@@ -16,8 +17,6 @@ if TYPE_CHECKING:
 MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 MAX_BATCH_BYTES = 16 * 1024 * 1024
 MAX_BATCH_SNAPSHOTS = 256
-MAX_DEPTH = 64
-MAX_NODES = 100_000
 
 
 @dataclass(frozen=True)
@@ -226,49 +225,18 @@ def _event_payload(event: SnapshotEvent) -> dict[str, Any]:
             raise ValueError("axis names must contain 1 to 256 UTF-8 bytes")
         axes[name] = _integer(value, f"axis {name!r}")
     return {
-        "state": _json_value(event.state, 0, set(), [MAX_NODES]),
+        "state": normalize_json(
+            event.state,
+            field="state",
+            coerce=False,
+            encode_nonfinite=False,
+        ),
         "observed_at_ns": (
             None if event.observed_at_ns is None
             else _integer(event.observed_at_ns, "observed_at_ns")
         ),
         "axes": axes,
     }
-
-
-def _json_value(value: Any, depth: int, ancestors: set[int], budget: list[int]) -> Any:
-    """Copy only explicit JSON values; never invoke tensor/model conversion hooks."""
-    budget[0] -= 1
-    if budget[0] < 0:
-        raise ValueError("state exceeds 100000 JSON nodes")
-    if depth > MAX_DEPTH:
-        raise ValueError("JSON nesting exceeds 64 levels")
-    if isinstance(value, (Mapping, list)):
-        if id(value) in ancestors:
-            raise ValueError("state contains a circular reference")
-        ancestors.add(id(value))
-        try:
-            if isinstance(value, Mapping):
-                result = {}
-                for key, child in value.items():
-                    if not isinstance(key, str):
-                        raise TypeError("JSON object keys must be strings")
-                    result[key] = _json_value(child, depth + 1, ancestors, budget)
-                return result
-            return [_json_value(child, depth + 1, ancestors, budget) for child in value]
-        finally:
-            ancestors.remove(id(value))
-    if value is None or isinstance(value, (str, bool)):
-        return value
-    if isinstance(value, int):
-        if not -(2**63) <= value < 2**64:
-            raise ValueError("JSON integers must fit signed or unsigned 64-bit storage")
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("JSON numbers must be finite")
-        return value
-    raise TypeError("state must contain only JSON values; no automatic tensor/model conversion")
-
 
 def _integer(value: Integral, field_name: str) -> int:
     """Accept integer coordinates without boolean coercion or fractional truncation."""

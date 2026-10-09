@@ -117,7 +117,14 @@ rvx tui --config rvx.toml --run grpo-20260921-001
 ```
 
 Use `q` to quit, `r` to refresh immediately, and `j`/`k`, arrow keys, or
-Page Up/Page Down to scroll. For logs, scripts, or non-interactive terminals:
+Page Up/Page Down to scroll. Refresh requests run alongside terminal input:
+scrolling, resizing and quitting remain responsive while the server is slow.
+Only one refresh may be in flight. Repeated `r` presses during a request
+coalesce into one follow-up refresh; the last successful frame stays visible.
+Quitting or a terminal error cancels the pending request before restoring the
+terminal.
+
+For logs, scripts, or non-interactive terminals:
 
 ```bash
 rvx tui --config rvx.toml --once

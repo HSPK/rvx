@@ -462,7 +462,7 @@ axis = "optimizer_step"
                     span_count=True,
                     serve=True,
                 )
-                self.cli(
+                registration = self.cli(
                     base,
                     "sources",
                     "register",
@@ -479,11 +479,21 @@ axis = "optimizer_step"
                 )
                 artifact = fixture / "checkpoint.bin"
                 artifact.write_bytes(b"weights")
-                tracker.log_artifact(artifact, name="model", type="checkpoint")
+                tracker.log_artifact(
+                    artifact,
+                    name="model",
+                    type="checkpoint",
+                    aliases=["best"],
+                )
                 tracker.log({}, step=3)
                 with rvx_tracker.Span(tracker, "forward", {"batch": 2}):
                     pass
                 tracker.log({"loss": 3.0}, step=3, commit=True)
+                tracker.alert("notice", "does not replace loss", level="info")
+                acknowledgment = tracker.flush(
+                    durable=True, server_url=base, source_id=registration["id"], timeout=5,
+                )
+                self.assertTrue(acknowledgment["persistence"]["complete"])
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if api_request(base, "/api/experiments/stats")["snapshots"] >= 2:
@@ -496,7 +506,8 @@ axis = "optimizer_step"
                     payload={"run_id": run["id"]},
                 )["snapshots"]
                 self.assertTrue(any(row["state"]["artifacts"] for row in history))
-                latest = history[0]["state"]
+                self.assertEqual(history[0]["state"]["tracker"]["kind"], "event")
+                latest = self.cli(base, "snapshots", "latest", "--run", run["id"])["snapshots"][0]["state"]
                 self.assertEqual(latest["metrics"]["loss"], 3.0)
                 self.assertEqual(latest["alerts"][0]["message"], "high loss")
                 self.assertEqual(latest["spans"][0]["name"], "forward")
@@ -510,9 +521,31 @@ axis = "optimizer_step"
                     "--axis",
                     "step",
                 )
+                self.assertEqual(query["series"][0]["values"], [3.0])
+                lineage = self.cli(
+                    base,
+                    "artifacts",
+                    "lineage",
+                    "--run",
+                    run["id"],
+                    "--name",
+                    "model",
+                )
+                self.assertEqual(lineage["artifacts"][0]["aliases"], ["best"])
+                resolved = self.cli(
+                    base,
+                    "artifacts",
+                    "resolve",
+                    "--run",
+                    run["id"],
+                    "--name",
+                    "model",
+                    "--alias",
+                    "best",
+                )
                 self.assertEqual(
-                    [value for value in query["series"][0]["values"] if value is not None],
-                    [3.0],
+                    resolved["artifact"]["digest"],
+                    lineage["artifacts"][0]["digest"],
                 )
                 trace_path = fixture / "trace.json"
                 exported = self.cli(
@@ -526,6 +559,12 @@ axis = "optimizer_step"
                 self.assertEqual(exported["spans_exported"], 1)
                 trace = json.loads(trace_path.read_text())
                 self.assertEqual(trace["traceEvents"][0]["name"], "forward")
+                finished = tracker.finish(exit_code=1, durable=True, server_url=base,
+                                          source_id=registration["id"], timeout=5)
+                self.assertTrue(finished["persistence"]["complete"])
+                self.assertEqual(tracker.info()["status"], "failed")
+                self.assertEqual(self.cli(base, "query", "--run", run["id"],
+                                         "--field", "/metrics/loss")["series"][0]["values"], [3.0])
                 self.stop_daemon(process, signal.SIGTERM)
             finally:
                 if tracker is not None:

@@ -2,91 +2,77 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::TrackerError;
+pub use rvx_core::{ArtifactAction, ArtifactRecord};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ArtifactAction {
-    Log,
-    Use,
+pub fn local(
+    action: ArtifactAction,
+    path: impl AsRef<Path>,
+    name: String,
+    kind: String,
+    aliases: Vec<String>,
+    metadata: Value,
+) -> Result<ArtifactRecord, TrackerError> {
+    validate(&name, "artifact name")?;
+    validate(&kind, "artifact type")?;
+    let path = path.as_ref();
+    let (digest, size) = digest_path(path)?;
+    let record = ArtifactRecord {
+        record_version: 1,
+        action,
+        name,
+        kind,
+        digest,
+        size,
+        uri: path
+            .canonicalize()?
+            .to_str()
+            .ok_or_else(|| TrackerError::InvalidInput("artifact path is not UTF-8".into()))?
+            .to_string(),
+        aliases,
+        metadata,
+    };
+    record
+        .validate()
+        .map_err(|e| TrackerError::InvalidInput(e.to_string()))?;
+    Ok(record)
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct ArtifactRecord {
-    pub action: ArtifactAction,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub digest: String,
-    pub size: u64,
-    pub uri: String,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub metadata: Value,
-}
-
-impl ArtifactRecord {
-    pub fn local(
-        action: ArtifactAction,
-        path: impl AsRef<Path>,
-        name: String,
-        kind: String,
-        aliases: Vec<String>,
-        metadata: Value,
-    ) -> Result<Self, TrackerError> {
-        validate(&name, "artifact name")?;
-        validate(&kind, "artifact type")?;
-        let path = path.as_ref();
-        let (digest, size) = digest_path(path)?;
-        Ok(Self {
-            action,
-            name,
-            kind,
-            digest,
-            size,
-            uri: path
-                .canonicalize()
-                .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy()
-                .into_owned(),
-            aliases,
-            metadata,
-        })
+pub fn reference(
+    action: ArtifactAction,
+    uri: String,
+    name: String,
+    kind: String,
+    digest: String,
+    aliases: Vec<String>,
+    metadata: Value,
+) -> Result<ArtifactRecord, TrackerError> {
+    for (value, field) in [
+        (&uri, "artifact URI"),
+        (&name, "artifact name"),
+        (&kind, "artifact type"),
+        (&digest, "artifact digest"),
+    ] {
+        validate(value, field)?;
     }
-
-    pub fn reference(
-        action: ArtifactAction,
-        uri: String,
-        name: String,
-        kind: String,
-        digest: String,
-        aliases: Vec<String>,
-        metadata: Value,
-    ) -> Result<Self, TrackerError> {
-        for (value, field) in [
-            (&uri, "artifact URI"),
-            (&name, "artifact name"),
-            (&kind, "artifact type"),
-            (&digest, "artifact digest"),
-        ] {
-            validate(value, field)?;
-        }
-        Ok(Self {
-            action,
-            name,
-            kind,
-            digest,
-            size: 0,
-            uri,
-            aliases,
-            metadata,
-        })
-    }
+    let record = ArtifactRecord {
+        record_version: 1,
+        action,
+        name,
+        kind,
+        digest,
+        size: 0,
+        uri,
+        aliases,
+        metadata,
+    };
+    record
+        .validate()
+        .map_err(|e| TrackerError::InvalidInput(e.to_string()))?;
+    Ok(record)
 }
 
 fn validate(value: &str, field: &str) -> Result<(), TrackerError> {

@@ -33,6 +33,8 @@ class ReleaseContractTests(unittest.TestCase):
             "rvx/adapters.py": "",
             "rvx/service.py": "",
             "rvx/tracker.py": "",
+            "rvx/_json_values.py": "",
+            "rvx/_tracker_run.py": "",
             "rvx/_tracker_span.py": "",
             "rvx/_tracker_values.py": "",
             "rvx/config.py": "",

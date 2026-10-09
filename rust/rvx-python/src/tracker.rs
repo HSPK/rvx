@@ -6,9 +6,9 @@ use parking_lot::Mutex;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use rvx_alert_http::{DeliveryConfig, Dispatcher};
 use rvx_tracker::{
-    AlertLevel, AlertRule, ArtifactAction, ArtifactRecord, DeliveryConfig, SpanRecord, Tracker,
-    TrackerOptions,
+    AlertLevel, AlertRule, AlertSink, ArtifactAction, SpanRecord, Tracker, TrackerOptions,
 };
 use serde_json::Value;
 
@@ -73,7 +73,10 @@ impl RvxTracker {
         let rules = rules(&alert_rules_json)?;
         let delivery: DeliveryConfig =
             serde_json::from_str(&alert_config_json).map_err(input_error)?;
-        let tracker = Tracker::new(source.producer(), config, options, rules, delivery)
+        let sink = Dispatcher::new(delivery)
+            .map_err(operation_error)?
+            .map(|dispatcher| Arc::new(dispatcher) as Arc<dyn AlertSink>);
+        let tracker = Tracker::with_alert_sink(source.producer(), config, options, rules, sink)
             .map_err(operation_error)?;
         Ok(Self {
             source,
@@ -222,7 +225,7 @@ impl RvxTracker {
         let action = parse_action(action)?;
         py.allow_threads(|| {
             let metadata: Value = serde_json::from_str(&metadata_json).map_err(input_error)?;
-            let artifact = ArtifactRecord::local(
+            let artifact = rvx_tracker::local_artifact(
                 action,
                 PathBuf::from(path),
                 name,
@@ -268,7 +271,7 @@ impl RvxTracker {
         let action = parse_action(action)?;
         py.allow_threads(|| {
             let metadata: Value = serde_json::from_str(&metadata_json).map_err(input_error)?;
-            let artifact = ArtifactRecord::reference(
+            let artifact = rvx_tracker::reference_artifact(
                 action,
                 uri,
                 name,
@@ -288,20 +291,52 @@ impl RvxTracker {
         })
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn tracker_history_json(&self, py: Python<'_>, limit: Option<isize>) -> PyResult<String> {
+    fn history_query_json(&self, py: Python<'_>, payload: String) -> PyResult<String> {
         self.check_process()?;
-        let limit = match limit {
-            None | Some(-1) => None,
-            Some(value) if value >= 0 => Some(value as usize),
-            Some(_) => {
-                return Err(PyValueError::new_err(
-                    "history limit must be non-negative, -1, or None",
-                ))
-            }
-        };
+        if payload.len() > 64 * 1024 {
+            return Err(input_error("history query exceeds 64 KiB"));
+        }
         py.allow_threads(|| {
-            serde_json::to_string(&self.tracker.history(limit)).map_err(operation_error)
+            let query =
+                serde_json::from_str::<rvx_tracker::HistoryQuery>(&payload).map_err(input_error)?;
+            serde_json::to_string(
+                &self
+                    .tracker
+                    .history_query(&query)
+                    .map_err(operation_error)?,
+            )
+            .map_err(operation_error)
+        })
+    }
+
+    fn wait_persisted_json(
+        &self,
+        py: Python<'_>,
+        url: String,
+        source_id: String,
+        next_sequence: u64,
+        timeout_ms: u64,
+    ) -> PyResult<String> {
+        self.check_process()?;
+        let descriptor = self.source.producer().descriptor();
+        if next_sequence > self.source.producer().stats().next_sequence {
+            return Err(input_error(
+                "requested durability cursor has not been accepted",
+            ));
+        }
+        py.allow_threads(|| {
+            let response = crate::ack::wait(
+                &url,
+                rvx_core::PersistedCursorRequest {
+                    run_id: descriptor.run_id,
+                    source_id,
+                    source_session_id: descriptor.source_session_id,
+                    next_sequence,
+                },
+                timeout_ms,
+            )
+            .map_err(operation_error)?;
+            serde_json::to_string(&response).map_err(operation_error)
         })
     }
 
@@ -315,13 +350,53 @@ impl RvxTracker {
         py.allow_threads(|| serde_json::to_string(&self.tracker.info()).map_err(operation_error))
     }
 
-    fn finish_json(&self, py: Python<'_>, observed_at_ns: Option<i64>) -> PyResult<String> {
+    fn delivery_stats_json(&self, py: Python<'_>) -> PyResult<String> {
+        self.check_process()?;
+        py.allow_threads(|| {
+            serde_json::to_string(&serde_json::json!({
+                "queue": self.tracker.delivery_stats(), "transport": self.tracker.sink_stats(),
+            }))
+            .map_err(operation_error)
+        })
+    }
+
+    #[staticmethod]
+    fn replay_json(
+        py: Python<'_>,
+        rules_json: String,
+        inputs_json: String,
+        started_at_ns: i64,
+        capacity: usize,
+    ) -> PyResult<String> {
+        if rules_json.len() + inputs_json.len() > MAX_TRACKER_INPUT_BYTES {
+            return Err(input_error("replay input exceeds 16 MiB"));
+        }
+        py.allow_threads(|| {
+            let inputs = serde_json::from_str(&inputs_json).map_err(input_error)?;
+            let events =
+                rvx_tracker::replay_alerts(rules(&rules_json)?, started_at_ns, capacity, inputs)
+                    .map_err(operation_error)?;
+            let encoded = serde_json::to_string(&events).map_err(operation_error)?;
+            if encoded.len() > MAX_TRACKER_INPUT_BYTES {
+                return Err(input_error("replay output exceeds 16 MiB"));
+            }
+            Ok(encoded)
+        })
+    }
+
+    #[pyo3(signature = (observed_at_ns=None, failed=false))]
+    fn finish_json(
+        &self,
+        py: Python<'_>,
+        observed_at_ns: Option<i64>,
+        failed: bool,
+    ) -> PyResult<String> {
         self.check_process()?;
         py.allow_threads(|| {
             serde_json::to_string(
                 &self
                     .tracker
-                    .finish(observed_at_ns)
+                    .finish_status(observed_at_ns, failed)
                     .map_err(operation_error)?,
             )
             .map_err(operation_error)
@@ -371,9 +446,12 @@ impl RvxTracker {
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         self.check_process()?;
-        if self.tracker.info().status == "running" {
-            let _ = self.tracker.finish(None);
-        }
+        py.allow_threads(|| {
+            if self.tracker.info().status == "running" {
+                self.tracker.finish(None).map_err(operation_error)?;
+            }
+            Ok::<_, PyErr>(())
+        })?;
         self.source.close(py)
     }
 }
@@ -391,10 +469,6 @@ impl RvxTrackerSpan {
                 "do not reuse tracker spans after fork",
             ));
         }
-        let mut ended = self.ended.lock();
-        if *ended {
-            return Ok("null".into());
-        }
         if attributes_json.len() > MAX_TRACKER_INPUT_BYTES {
             return Err(PyValueError::new_err("span attributes exceed 16 MiB"));
         }
@@ -404,13 +478,18 @@ impl RvxTrackerSpan {
                 "span attributes must be a JSON object",
             ));
         }
-        let elapsed = self.started.elapsed();
-        let duration_ms = elapsed.as_secs_f64() * 1_000.0;
-        let end_ns = self
-            .start_ns
-            .saturating_add(elapsed.as_nanos().min(i64::MAX as u128) as i64);
-        let result = py.allow_threads(|| {
-            self.tracker
+        py.allow_threads(|| {
+            let mut ended = self.ended.lock();
+            if *ended {
+                return Ok("null".into());
+            }
+            let elapsed = self.started.elapsed();
+            let duration_ms = elapsed.as_secs_f64() * 1_000.0;
+            let end_ns = self
+                .start_ns
+                .saturating_add(elapsed.as_nanos().min(i64::MAX as u128) as i64);
+            let result = self
+                .tracker
                 .record_span(
                     SpanRecord {
                         name: self.name.clone(),
@@ -422,14 +501,13 @@ impl RvxTrackerSpan {
                     },
                     self.step,
                 )
-                .map_err(operation_error)
-        })?;
-        *ended = true;
-        serde_json::to_string(&serde_json::json!({
-            "duration_ms": duration_ms,
-            "result": result,
-        }))
-        .map_err(operation_error)
+                .map_err(operation_error)?;
+            *ended = true;
+            serde_json::to_string(&serde_json::json!({
+                "duration_ms": duration_ms, "result": result,
+            }))
+            .map_err(operation_error)
+        })
     }
 }
 

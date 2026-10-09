@@ -59,6 +59,8 @@ Every committed step produces one full RVX snapshot:
     "summary": {"loss": 0.31, "lr": 0.0001},
     "config": {"batch_size": 32},
     "tracker": {
+      "record_version": 1,
+      "kind": "observation",
       "step": 42,
       "status": "running",
       "commit": 43,
@@ -70,6 +72,18 @@ Every committed step produces one full RVX snapshot:
   }
 }
 ```
+
+Manual alerts, watchdog alerts, artifacts and terminal lifecycle notifications
+use `tracker.kind = "event"` with the same Source/Session/sequence envelope.
+They are retained in `/v1/snapshots/history` and daemon snapshot history, but
+never replace the observation returned by `latest`, update chart heads, or add
+null points to metric queries. An event-only Source has no latest observation.
+Producer retention pins the latest observation within the configured byte
+budget even when events evict its historical entry.
+
+The daemon rebuilds old derived chart heads when upgrading the index. Legacy
+records without `tracker.record_version` retain their original observation
+meaning; the migration does not guess whether old snapshots were events.
 
 `metrics` contains only values committed for that step. Missing metrics remain
 missing instead of being repeated as new observations. `summary` contains the
@@ -95,15 +109,76 @@ The API follows the useful `wandb.log` conventions:
 - The default monotonic policy rejects older steps with a warning. Use
   `step_policy="allow"` when out-of-order producers are intentional.
 
+`run.step` is the target of the next implicit `log()`: the selected open step,
+if any, otherwise the committed high-water `next_step`. Selecting an older
+open step with the `allow` policy does not lower that committed high-water mark.
+
 There is no JSONL writer, sidecar, sparse file index, or separate metric cache.
 The bounded local history exists only for synchronous SDK reads; durable and
 cross-process history comes from the RVX daemon.
 
-Tracker commits use a two-phase invariant: construct the prospective step,
-summary, alert transitions and snapshot first; append it to the native producer;
-only then advance the in-memory step cursor, summary, history and rule state.
-A rejected/oversized/sealed capture therefore cannot leave success-shaped local
-state that the daemon never received.
+Tracker calls use a two-phase invariant: prepare the entire call's prospective
+state, alert transitions and snapshots, append them in one atomic native
+`capture_batch`, then apply the local state. Advancing and committing a new step
+in one call can emit two observations; failure of the second leaves the previous
+open step, history, summary, alert state and producer cursor unchanged.
+History records and alert series use shared ownership during preparation,
+rather than deep-copying the complete history.
+
+### Accepted versus durable
+
+Committed `log()`/ordinary `flush()` only mean accepted into the bounded Source
+buffer; `commit=False` stages an open row and does not advance the Source cursor.
+The result exposes the accepted `capture` interval when a record was emitted.
+Neither promises SQLite persistence or remote alert delivery. Use an explicit
+confirmation when training must not exit before its final records are retained:
+
+```python
+# source_id is returned by `rvx sources register` for this Run endpoint.
+run.flush(durable=True, server_url="http://127.0.0.1:9110",
+          source_id=source_id, timeout=30)
+result = run.finish(exit_code=0, durable=True,
+                    server_url="http://127.0.0.1:9110",
+                    source_id=source_id, timeout=30)
+assert result["persistence"]["complete"]
+run.close()
+```
+
+The native SDK polls `POST /api/snapshots/ack` for the exact Run, registered
+Source and Session cursor. Only a committed SQLite cursor with no earlier
+retention gaps can confirm completeness. A future cursor, another Session,
+unknown Source, gaps or a timeout cannot produce a successful acknowledgment.
+Timeouts are bounded and surfaced as errors; `wait_persisted()` can retry
+confirmation without writing the batch again. Keep the Source HTTP transport
+running until confirmation succeeds. Closing without confirmation remains
+explicitly best-effort.
+
+`exit_code != 0` emits a `failed` tracker event. This is a per-Source lifecycle,
+not permission to terminate other Sources in the shared registry Run; the
+existing Run control API continues to own that aggregate lifecycle.
+
+### SDK queries and budgets
+
+History field projection, half-open step range, tail limit, missing-value
+handling and `include_open` execute in Rust before crossing PyO3. Python only
+converts the bounded result to dict/pandas/polars. Open patches merge with the
+retained committed step for local reads without mutating it.
+
+| Budget | Default |
+| --- | --- |
+| `max_state_bytes` (open row, spans, summary, config) | 8 MiB encoded JSON |
+| `max_history_bytes` | 64 MiB encoded committed records |
+| `history_steps` | 1,024 |
+| `max_metrics` (open row, summary, alert series) | 4,096 |
+| `max_spans` per open step | 4,096 |
+| `max_alert_series_bytes` | 64 MiB accounted series storage |
+| `history(..., max_bytes=...)` | 16 MiB result |
+
+Oversized working state is rejected before admission. Committed local history
+evicts oldest records to satisfy both count and bytes; `info()` exposes
+`history_bytes` and `evicted_steps`. `history(-1)` means all *retained local*
+steps, not all durable daemon history. These budgets are not a process RSS
+guarantee. The existing producer count/byte limits remain independently enforced.
 
 The Rust implementation keeps those responsibilities separated:
 
@@ -116,11 +191,14 @@ The Rust implementation keeps those responsibilities separated:
 | `alert/expression/syntax.rs` | Lexer, AST and parser |
 | `alert/expression/eval.rs` | Windows, functions and three-valued evaluation |
 | `alert/mod.rs` | Rule state transitions and prepared alert updates |
-| `dispatch.rs` | `AlertSink` plus the asynchronous HTTP delivery implementation |
+| `alert_sink.rs` | Transport-neutral delivery interface |
+| `delivery.rs` | Ordered bounded queue isolating tracker state from foreign sinks |
 | `artifact.rs` | Deterministic digest and lineage records |
 
 `rvx-config` is a separate neutral crate shared by `rvx` and `rvxd`; the CLI
 does not depend on the server, engine, or SQLite implementation.
+The default webhook worker lives in `rvx-alert-http`; `rvx-tracker` itself has
+no HTTP client dependency and accepts any `AlertSink` implementation.
 
 ## Alerts
 
@@ -133,6 +211,23 @@ logic, and:
 - `increasing`, `decreasing`, `stalled`
 - `isnan`, `isinf`, `has`
 - `step`, `elapsed`, `age`, `no_data`
+
+Unknown functions, wrong arity, oversized expressions and windows larger than
+`alert_window` fail at rule installation, not as silent `UNKNOWN` results.
+`metric[N]` requires N recorded numeric samples by default; set
+`partial_window=True` on a rule to opt into warm-up evaluation. Duration windows
+require retained coverage of the whole interval. Missing values and arithmetic
+over non-finite data yield `UNKNOWN`; only `isnan`/`isinf` interpret the explicit
+non-finite encoding. Arithmetic comparisons do not carry forward a missing
+metric from an earlier training step.
+
+`for_steps` advances only for distinct committed steps, never timer ticks or
+same-step patches. Time conditions can use `for_duration_ms`; a watchdog
+evaluates only rules that actually reference time. `for_duration_ms` requires an
+explicit time condition, and unknown coverage resets its continuous-duration
+evidence. `rate` and `slope` use
+observation seconds by default (`axis="wall_time"`), or explicit logical step
+coordinates (`axis="step"`). Duplicate/regressing coordinates yield `UNKNOWN`.
 
 ```python
 et.add_alert_rule({
@@ -171,9 +266,37 @@ et.init(
 )
 ```
 
-The Rust delivery worker owns routing, bounded queueing, token-bucket limiting,
-deduplication, retry, and shutdown flushing. Delivery failures never raise in
-the training thread.
+The tracker queues events in commit order without invoking user callbacks under
+the state lock. Each HTTP channel has its own bounded queue and asynchronous
+worker, so a slow/retrying channel does not block another. Deduplication follows
+successful sends, not failed attempts; retriable responses honor `Retry-After`.
+Delivery exposes accepted/completed/pending/dropped/failed/suppressed counters.
+
+`shutdown_timeout_ms` on the tracker is a total waiting budget, including queue
+flush and foreign callbacks. The HTTP adapter cancels in-flight work on close.
+Rust cannot forcibly terminate an arbitrary custom sink callback: when one
+ignores shutdown, RVX reports the timeout and abandons that worker rather than
+blocking training indefinitely. Delivery is best-effort, not exactly-once and
+not a crash-resumable outbox. Event evidence is retained independently in the
+Source history and, after Pull, SQLite.
+
+Replay uses the same Rust compiler and execution path:
+
+```python
+events = et.replay_alerts(
+    ["mean(loss[2]) > 1 => error: high"],
+    [
+        {"kind": "step", "step": 0, "observed_at_ns": 1000000000,
+         "metrics": {"loss": 1}},
+        {"kind": "step", "step": 1, "observed_at_ns": 2000000000,
+         "metrics": {"loss": 3}},
+        {"kind": "tick", "step": 1, "observed_at_ns": 3000000000},
+    ],
+)
+```
+
+Replay inputs are chronological; explicit tick records preserve watchdog
+semantics. Inputs, rule count, retained series and output size are bounded.
 
 ## Spans and traces
 
@@ -194,10 +317,25 @@ Export retained span records to Chrome Trace/Perfetto:
 
 ```bash
 rvx trace --run RUN_ID --output trace.json
+rvx trace --run RUN_ID --output trace.json --temp-dir /scratch
 ```
 
 The exporter reads ordinary snapshot history, so source/time filters and server
 authentication remain consistent with every other RVX read.
+Events are sorted by start timestamp, with equal timestamps retaining their
+original history traversal order. Export does not accumulate the entire trace
+in RAM: HTTP pages are capped at 16 MiB, initial sort chunks use an 8 MiB budget,
+and external merge passes read at most eight runs at a time. Memory depends on
+one page, a bounded sort chunk and merge records, not the total event count.
+Those encoded-byte budgets are not a process RSS guarantee.
+
+Sorting uses temporary files in the output directory by default. `--temp-dir`
+selects an existing scratch directory; choose disk-backed storage for large
+traces rather than a memory-backed temporary filesystem. Scratch disk usage
+grows with the trace, and the output filesystem needs room for the complete
+replacement file. Temporary files are cleaned up on success or returned errors.
+The previous destination is replaced atomically only after sorting, streaming
+JSON output and file synchronization succeed.
 
 ## Artifact lineage
 
@@ -222,8 +360,25 @@ et.use_artifact(
 
 Local files/directories are hashed in Rust with deterministic SHA-256 directory
 ordering. Snapshots retain action, name, type, digest, size, URI, aliases, and
-metadata. RVX does not copy model checkpoints into its SQLite database; content
-remains in the caller's filesystem or object store.
+metadata. A rebuildable SQLite index supports bounded lineage and alias
+resolution without becoming another source of truth:
+
+```bash
+rvx artifacts lineage --run RUN_ID --name model
+rvx artifacts resolve --run RUN_ID --name model --alias best
+```
+
+The matching HTTP APIs are `POST /api/artifacts/lineage` and
+`POST /api/artifacts/resolve`. RVX does not copy model checkpoints into its
+SQLite database; content remains in the caller's filesystem or object store.
+The versioned `ArtifactRecord` and its validation live in `rvx-core` and are
+shared by producers and indexers. Legacy records without an explicit version
+decode as version 1. Invalid historical records are retained as raw evidence
+with indexed exclusion reasons. Lineage returns scope-wide `coverage` counts;
+resolve rejects incomplete coverage instead of presenting a potentially stale
+alias as authoritative. Pages are streamed with byte limits before collecting
+large metadata. Alias lookups use a dedicated derived table; within the
+explicit Run/Source scope, the newest `(snapshot_id, artifact_index)` wins.
 
 ## Migration from `expr_tracker`
 
@@ -243,4 +398,7 @@ The core `init`, `log`, `finish`, `history`, `summary`, `span`, `alert`,
 `log_artifact`, and `use_artifact` workflows are available. RVX intentionally
 does not reproduce JSONL as a second source of truth. Wandb/trackio are external
 mirrors rather than part of the native storage contract and can be operated
-beside RVX when required.
+beside RVX when required. Passing `backends`/`backend_kwargs`, local storage
+directories, cursor-resume modes, `define_metric`, or `quiet` raises an explicit
+unsupported-operation error; these are not silently accepted compatibility
+placeholders. `include_open` and `exit_code` have actual native semantics.

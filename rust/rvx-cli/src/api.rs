@@ -33,18 +33,34 @@ impl ApiClient {
     }
 
     pub async fn get(&self, path: &str) -> Result<Value> {
-        self.request(Method::GET, path, None).await
+        self.request(Method::GET, path, None, None).await
     }
 
     pub async fn post(&self, path: &str, payload: Value) -> Result<Value> {
-        self.request(Method::POST, path, Some(payload)).await
+        self.request(Method::POST, path, Some(payload), None).await
     }
 
     pub async fn patch(&self, path: &str, payload: Value) -> Result<Value> {
-        self.request(Method::PATCH, path, Some(payload)).await
+        self.request(Method::PATCH, path, Some(payload), None).await
     }
 
-    async fn request(&self, method: Method, path: &str, payload: Option<Value>) -> Result<Value> {
+    pub async fn post_bounded(
+        &self,
+        path: &str,
+        payload: Value,
+        max_bytes: usize,
+    ) -> Result<Value> {
+        self.request(Method::POST, path, Some(payload), Some(max_bytes))
+            .await
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<Value>,
+        max_bytes: Option<usize>,
+    ) -> Result<Value> {
         let mut request = self
             .client
             .request(method, format!("{}{path}", self.base_url))
@@ -55,14 +71,31 @@ impl ApiClient {
         if let Some(payload) = payload {
             request = request.json(&payload);
         }
-        let response = request.send().await.context("send RVX API request")?;
+        let mut response = request.send().await.context("send RVX API request")?;
         let status = response.status();
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let body = response.text().await.context("read RVX API response")?;
+        let body = if let Some(limit) = max_bytes {
+            if response
+                .content_length()
+                .is_some_and(|length| length > limit as u64)
+            {
+                bail!("RVX API response exceeds {limit} bytes");
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.context("read RVX API response")? {
+                if chunk.len() > limit.saturating_sub(bytes.len()) {
+                    bail!("RVX API response exceeds {limit} bytes");
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            String::from_utf8(bytes).context("RVX API returned non-UTF-8 JSON")?
+        } else {
+            response.text().await.context("read RVX API response")?
+        };
         if !status.is_success() {
             bail!("{}", http_error(status, &body, content_type.as_deref()));
         }
@@ -98,7 +131,13 @@ fn http_error(status: StatusCode, body: &str, content_type: Option<&str>) -> Str
         detail.clear();
     }
     if detail.len() > 400 {
-        detail.truncate(400);
+        let boundary = detail
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= 400)
+            .last()
+            .unwrap_or(0);
+        detail.truncate(boundary);
         detail.push_str("...");
     }
     format!(

@@ -1,5 +1,6 @@
 #![allow(non_local_definitions)]
 
+mod ack;
 mod source;
 mod tracker;
 
@@ -9,8 +10,9 @@ use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rvx_core::{
-    ChartCatalogRequest, RunStatus, SnapshotDiffRequest, SnapshotHistoryRequest,
-    SnapshotLatestRequest, SnapshotQueryRequest, SourceRegistration, SourceState,
+    ArtifactLineageRequest, ArtifactResolveRequest, ChartCatalogRequest, RunStatus,
+    SnapshotDiffRequest, SnapshotHistoryRequest, SnapshotLatestRequest, SnapshotQueryRequest,
+    SourceRegistration, SourceState,
 };
 use rvx_engine::Engine;
 use tokio::runtime::{Builder, Runtime};
@@ -291,6 +293,33 @@ impl RvxEngine {
         py.allow_threads(|| {
             let request: ChartCatalogRequest = serde_json::from_str(&payload)?;
             serde_json::to_string(&self.engine.chart_catalog(&request)?)
+                .map_err(rvx_engine::EngineError::from)
+        })
+        .map_err(runtime_error)
+    }
+
+    fn artifact_lineage(&self, py: Python<'_>, payload: String) -> PyResult<String> {
+        py.allow_threads(|| {
+            let request: ArtifactLineageRequest = serde_json::from_str(&payload)?;
+            serde_json::to_string(&self.engine.artifact_lineage(&request)?)
+                .map_err(rvx_engine::EngineError::from)
+        })
+        .map_err(runtime_error)
+    }
+
+    fn artifact_resolve(&self, py: Python<'_>, payload: String) -> PyResult<String> {
+        py.allow_threads(|| {
+            let request: ArtifactResolveRequest = serde_json::from_str(&payload)?;
+            serde_json::to_string(&self.engine.artifact_resolve(&request)?)
+                .map_err(rvx_engine::EngineError::from)
+        })
+        .map_err(runtime_error)
+    }
+
+    fn persisted_cursor(&self, py: Python<'_>, payload: String) -> PyResult<String> {
+        py.allow_threads(|| {
+            let request: rvx_core::PersistedCursorRequest = serde_json::from_str(&payload)?;
+            serde_json::to_string(&self.engine.persisted_cursor(&request)?)
                 .map_err(rvx_engine::EngineError::from)
         })
         .map_err(runtime_error)

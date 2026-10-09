@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::numeric_value;
 
+use super::super::RuleAxis;
 use super::super::Sample;
 use super::syntax::{BinaryOp, Expr, UnaryOp, Window};
 
@@ -67,6 +69,7 @@ impl Evaluated {
     fn number(&self) -> Option<f64> {
         match self {
             Self::Number(value) => Some(*value),
+            Self::Duration(value) => Some(*value as f64 / 1_000_000_000.0),
             _ => None,
         }
     }
@@ -86,8 +89,11 @@ pub(crate) struct EvalContext<'a> {
     pub(crate) started_at_ns: i64,
     pub(crate) last_observed_at_ns: Option<i64>,
     pub(crate) metrics: &'a BTreeMap<String, Value>,
-    pub(crate) series: &'a HashMap<String, VecDeque<Sample>>,
+    pub(crate) series: &'a HashMap<String, Arc<VecDeque<Sample>>>,
     pub(crate) pending: &'a BTreeMap<String, Sample>,
+    pub(crate) partial_window: bool,
+    pub(crate) axis: RuleAxis,
+    pub(crate) tick: bool,
 }
 
 pub(crate) fn evaluate(expression: &Expr, context: &EvalContext<'_>) -> Evaluated {
@@ -127,35 +133,47 @@ fn metric_value(name: &str, window: Option<&Window>, context: &EvalContext<'_>) 
     if window.is_none() {
         return current
             .or_else(|| {
-                context
-                    .series
-                    .get(name)
-                    .and_then(|series| series.back())
-                    .map(|sample| sample.value)
+                if context.tick {
+                    context
+                        .series
+                        .get(name)
+                        .and_then(|series| series.back())
+                        .map(|sample| sample.value)
+                } else {
+                    None
+                }
             })
             .map(Evaluated::Number)
             .unwrap_or(Evaluated::Unknown);
     }
-    let mut values: Vec<_> = context
-        .series
-        .get(name)
-        .into_iter()
-        .flat_map(|series| series.iter().cloned())
-        .collect();
-    if let Some(sample) = context.pending.get(name) {
-        values.push(sample.clone());
+    let stored = context.series.get(name);
+    let pending = context.pending.get(name);
+    let length = stored.map_or(0, |s| s.len()) + usize::from(pending.is_some());
+    if matches!(window, Some(Window::Points(points)) if !context.partial_window && length < *points)
+    {
+        return Evaluated::Unknown;
     }
+    let skip = match window {
+        Some(Window::Points(points)) => length.saturating_sub(*points),
+        _ => 0,
+    };
+    let mut values: Vec<_> = stored
+        .into_iter()
+        .flat_map(|series| series.iter())
+        .chain(pending)
+        .skip(skip)
+        .cloned()
+        .collect();
     let values = match window.unwrap() {
-        Window::Points(points) => {
-            let skip = values.len().saturating_sub(*points);
-            values.into_iter().skip(skip).collect()
-        }
+        Window::Points(_) => values,
         Window::Duration(duration) => {
             let start = context.observed_at_ns.saturating_sub(*duration);
+            if !context.partial_window && !values.first().is_some_and(|s| s.observed_at_ns <= start)
+            {
+                return Evaluated::Unknown;
+            }
+            values.retain(|sample| sample.observed_at_ns >= start);
             values
-                .into_iter()
-                .filter(|sample| sample.observed_at_ns >= start)
-                .collect()
         }
     };
     Evaluated::Series(values)
@@ -260,7 +278,7 @@ fn evaluate_call(name: &str, arguments: &[Expr], context: &EvalContext<'_>) -> E
             Some(Expr::Metric(metric, _)) => {
                 context.pending.contains_key(metric)
                     || context.metrics.contains_key(metric)
-                    || context.series.contains_key(metric)
+                    || context.tick && context.series.contains_key(metric)
             }
             _ => !matches!(first, Evaluated::Unknown),
         };
@@ -283,6 +301,12 @@ fn evaluate_call(name: &str, arguments: &[Expr], context: &EvalContext<'_>) -> E
             .unwrap_or(Evaluated::Unknown);
     }
     let values = first.values();
+    if matches!(first, Evaluated::Unknown) {
+        return Evaluated::Unknown;
+    }
+    if name != "count" && values.iter().any(|value| !value.is_finite()) {
+        return Evaluated::Unknown;
+    }
     let finite: Vec<_> = values
         .iter()
         .copied()
@@ -318,9 +342,7 @@ fn evaluate_call(name: &str, arguments: &[Expr], context: &EvalContext<'_>) -> E
         "pct_change" if values.len() >= 2 && values[0] != 0.0 => {
             Evaluated::Number((values.last().unwrap() - values[0]) / values[0])
         }
-        "rate" if values.len() >= 2 => {
-            Evaluated::Number((values.last().unwrap() - values[0]) / (values.len() - 1) as f64)
-        }
+        "rate" | "slope" if values.len() >= 2 => trend(&first, context.axis, name == "rate"),
         "var" | "std" if finite.len() >= 2 => {
             let mean = finite.iter().sum::<f64>() / finite.len() as f64;
             let variance = finite
@@ -347,20 +369,6 @@ fn evaluate_call(name: &str, arguments: &[Expr], context: &EvalContext<'_>) -> E
             } else {
                 Evaluated::Number((finite.last().unwrap() - mean) / std)
             }
-        }
-        "slope" if finite.len() >= 2 => {
-            let n = finite.len() as f64;
-            let x_mean = (n - 1.0) / 2.0;
-            let y_mean = finite.iter().sum::<f64>() / n;
-            let numerator = finite
-                .iter()
-                .enumerate()
-                .map(|(index, value)| (index as f64 - x_mean) * (value - y_mean))
-                .sum::<f64>();
-            let denominator = (0..finite.len())
-                .map(|index| (index as f64 - x_mean).powi(2))
-                .sum::<f64>();
-            Evaluated::Number(numerator / denominator)
         }
         "ema" if !finite.is_empty() => {
             let alpha = arguments
@@ -418,5 +426,48 @@ pub(crate) fn touches_time(expression: &Expr) -> bool {
         Expr::Unary(_, value) => touches_time(value),
         Expr::Binary(_, left, right) => touches_time(left) || touches_time(right),
         _ => false,
+    }
+}
+
+fn trend(series: &Evaluated, axis: RuleAxis, rate: bool) -> Evaluated {
+    let Evaluated::Series(samples) = series else {
+        return Evaluated::Unknown;
+    };
+    let coordinate = |sample: &Sample| match axis {
+        RuleAxis::WallTime => sample.observed_at_ns,
+        RuleAxis::Step => sample.step,
+    };
+    if samples.len() < 2
+        || samples
+            .windows(2)
+            .any(|pair| coordinate(&pair[1]) <= coordinate(&pair[0]))
+    {
+        return Evaluated::Unknown;
+    }
+    let origin = coordinate(&samples[0]);
+    let scale = if matches!(axis, RuleAxis::WallTime) {
+        1e9
+    } else {
+        1.0
+    };
+    let xs: Vec<_> = samples
+        .iter()
+        .map(|s| (coordinate(s) as i128 - origin as i128) as f64 / scale)
+        .collect();
+    let result = if rate {
+        (samples[samples.len() - 1].value - samples[0].value) / xs[xs.len() - 1]
+    } else {
+        let mean_x = xs.iter().sum::<f64>() / xs.len() as f64;
+        let mean_y = samples.iter().map(|s| s.value).sum::<f64>() / xs.len() as f64;
+        xs.iter()
+            .zip(samples)
+            .map(|(x, s)| (x - mean_x) * (s.value - mean_y))
+            .sum::<f64>()
+            / xs.iter().map(|x| (x - mean_x).powi(2)).sum::<f64>()
+    };
+    if result.is_finite() {
+        Evaluated::Number(result)
+    } else {
+        Evaluated::Unknown
     }
 }

@@ -87,12 +87,13 @@ compatibility APIs are removed; archived scalar files are not loaded.
 | Path | Responsibility |
 | --- | --- |
 | `rust/rvx-core` | Identity, shared snapshot contracts, validation, lifecycle types |
+| `rust/rvx-alert-http` | Asynchronous webhook delivery adapter implementing `AlertSink` |
 | `rust/rvx-config` | Versioned TOML schema shared by the CLI and daemon |
 | `rust/rvx-snapshots` | Full-state producer buffer and HTTP Pull handlers |
 | `rust/rvx-tracker` | Step/commit tracking, summary, alerts, spans and artifact lineage |
 | `rust/rvx-engine` | Registry, scheduler, durable snapshot store and read operations |
 | `rust/rvx-server` | Authenticated control/read APIs, static UI, process lifetime |
-| `rust/rvx-cli` | Native control client, daemon launcher, TOML dashboard client and ratatui |
+| `rust/rvx-cli` | Native control client, daemon launcher, responsive ratatui dashboard and disk-backed trace export |
 | `rust/rvx-python` | Coarse PyO3 bindings and native producer runtime |
 | `src/rvx` | Python SDK facade plus ASGI/aiohttp adapters |
 | `web/src/app` | Multi-run charts/tables, Run details, server workspace preferences and connection state |
@@ -148,6 +149,8 @@ truncation rather than silently claiming to be complete.
 
 Metadata/control APIs remain under `/api/experiments/*`. There is one numeric
 query path, derived solely from snapshots; no legacy-query API remains.
+Creating an Experiment, Run, or Source with an unknown parent returns HTTP 400
+with an explicit unknown-parent error and does not create an orphan record.
 
 ## Server-owned UI state and connection telemetry
 
@@ -354,3 +357,84 @@ Old scalar-only benchmarks do not describe this implementation and are not
 performance claims for RVX. There is no head-to-head W&B or Prometheus benchmark.
 Large-scale healthy-target, multi-node RL, and long-duration snapshot workloads
 still need their own controlled measurements.
+
+### Reproducible local simulations
+
+`tests/simulation.py` is an opt-in CPU-local campaign runner, separate from the
+ordinary unit tests. It starts only owned loopback producers and daemons, uses
+fresh temporary data under `.build/`, and never opens an existing RVX store.
+
+```bash
+CARGO_BUILD_JOBS=4 cargo build --locked --release -p rvx-server -p rvx-cli
+uv sync --locked
+uv run --no-sync python -m tests.simulation \
+  --scenario load --sources 96 --workers 6 --steps 512 \
+  --scrape-concurrency 32 --timeout 300 --report .build/load-report.json
+uv run --no-sync python -m tests.simulation \
+  --scenario recovery --steps 2048 --timeout 180 --report .build/recovery-report.json
+uv run --no-sync python -m tests.simulation \
+  --scenario model --iterations 5000 --seed 1729 --report .build/model-report.json
+uv run --no-sync python -m tests.simulation \
+  --scenario collections --steps 4096 --report .build/collections-report.json
+```
+
+Load campaigns mix raw Sources and trackers across four Runs, then verify
+exact latest states, complete metric series, durable cursors, event isolation,
+and restart persistence. Recovery exercises an owned daemon's SIGKILL, producer
+reconnection, fresh Sessions, and eviction gaps. The independent seeded model
+checks step/commit/history semantics; collections checks exact integers,
+filter/sort pagination, artifact aliases, and derived-index rebuilding.
+`--scenario lifecycle` races eight finish callers per iteration;
+`--scenario registry` checks missing-parent rejection without orphan creation.
+
+Reports include parameters, executable/SDK/harness hashes, failures, and
+scenario-specific measurements. Load failures retain partial progress and
+request errors. `--keep-failed-data` also preserves the isolated store beside
+the report and records its path; this can consume substantial disk space.
+Otherwise all owned processes and temporary data are cleaned up. An HTTP
+request exceeding ten seconds fails the campaign rather than silently
+increasing its timeout.
+
+There are two closed-loop reader threads by default; `--readers 0` isolates
+ingestion apart from progress statistics. Reader rates then depend on response
+latency, so changing scrape concurrency does not give a fixed-RPS comparison.
+Use the performance controls for more specific experiments:
+
+```bash
+uv run --no-sync python -m tests.simulation \
+  --scenario load --sources 256 --workers 8 --steps 256 \
+  --readers 8 --read-rps 4 --scrape-concurrency 4 --read-phase-seconds 15 \
+  --timeout 600 --keep-failed-data --report .build/performance-report.json
+uv run --no-sync python -m tests.simulation \
+  --scenario storage --iterations 256 --report .build/storage-report.json
+```
+
+`--read-rps` schedules a total offered rate across the bounded reader threads.
+Reports distinguish attempted/completed requests, skipped arrival slots,
+late starts, HTTP latency, and latency measured from the scheduled arrival.
+They do not silently queue unlimited work or hide load-generator saturation.
+Progress requests use a separate one-second polling interval. Compare achieved
+rates and arrival delays, not just the configured rate.
+
+`--payload-kib` adds a repeated string to each observation; `--numeric-fields`
+adds nested numeric fields. Retention budgets include tracker events and
+conservative native tree-memory accounting, not just encoded JSON bytes.
+Unexpected eviction fails immediately. These synthetic shapes are not
+interchangeable throughput workloads; reports include actual stored JSON
+bytes and numeric-index entries.
+
+`--read-phase-seconds` adds sequential 1/4/8-reader phases after complete
+ingestion. Sources are explicitly ended and the daemon restarted to remove
+scraper traffic; these phases have no client think time. OS caches are not
+cleared, so these are not cold-disk benchmarks. The independent Linux sampler
+records daemon CPU, threads, sampled RSS, kernel process-lifetime HWM, I/O
+bytes, and host I/O pressure every half-second. The storage scenario measures
+isolated 4 KiB file fsync and SQLite WAL/FULL commits with batches of 1/64;
+it is a storage baseline, not RVX throughput.
+
+Run measured campaigns serially on shared hosts. The runner caps Sources at
+256, producer and reader threads/processes at eight each, steps at 4,096, and
+daemon Tokio workers at four. Payload combinations have an estimated 2 GiB
+serialized-volume guard and a 1 GiB per-Source buffer ceiling; these are not a
+whole-process RSS guarantee. These tests establish neither GPU/multi-node
+behavior nor long-duration reliability or production SLAs.

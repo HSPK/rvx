@@ -56,6 +56,7 @@ cache-keys = [
   { file = "rust/**/*.rs" },
   { file = "src/rvx/**/*.py" },
   { file = "rust/rvx-cli/**/*.rs" },
+  { file = "rust/rvx-alert-http/**/*.rs" },
   { file = "rust/rvx-config/**/*.rs" },
   { file = "rust/rvx-tracker/**/*.rs" },
   { file = "rvx.data/scripts/rvx" },

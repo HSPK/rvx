@@ -3,21 +3,22 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-pub use model::{AlertEvent, AlertLevel, AlertMode, AlertRule};
+pub use model::{AlertEvent, AlertLevel, AlertMode, AlertRule, RuleAxis};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::{numeric_value, TrackerError};
 use expression::{evaluate, touches_time, EvalContext, Expr, Parser, Tri};
 
-const DEFAULT_WINDOW: usize = 1_024;
 const MAX_WINDOW: usize = 100_000;
 
 #[derive(Clone, Debug)]
-struct Sample {
+pub(crate) struct Sample {
     observed_at_ns: i64,
+    step: i64,
     value: f64,
 }
 
@@ -27,6 +28,8 @@ struct RuleState {
     fires: u64,
     firing: bool,
     last_fire_ns: Option<i64>,
+    last_step: Option<i64>,
+    since_ns: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,7 +42,7 @@ struct CompiledRule {
 #[derive(Clone, Debug)]
 pub struct AlertEngine {
     rules: Vec<CompiledRule>,
-    series: HashMap<String, VecDeque<Sample>>,
+    series: HashMap<String, Arc<VecDeque<Sample>>>,
     capacity: usize,
     started_at_ns: i64,
     last_observed_at_ns: Option<i64>,
@@ -74,15 +77,23 @@ impl AlertEngine {
         started_at_ns: i64,
         capacity: usize,
     ) -> Result<Self, TrackerError> {
-        let capacity = capacity.clamp(DEFAULT_WINDOW, MAX_WINDOW);
+        if capacity == 0 || capacity > MAX_WINDOW {
+            return Err(TrackerError::InvalidInput(
+                "invalid alert window capacity".into(),
+            ));
+        }
+        if rules.len() > 256 {
+            return Err(TrackerError::InvalidInput("alert rule limit is 256".into()));
+        }
         let mut compiled = Vec::with_capacity(rules.len());
         for rule in rules {
-            if rule.name.trim().is_empty() || rule.for_steps == 0 {
-                return Err(TrackerError::InvalidInput(
-                    "alert rule name must be nonempty and for_steps must be positive".into(),
-                ));
+            if compiled
+                .iter()
+                .any(|c: &CompiledRule| c.rule.name == rule.name)
+            {
+                return Err(TrackerError::InvalidInput("duplicate rule name".into()));
             }
-            let expression = Parser::parse(&rule.condition)?;
+            let expression = validate_rule(&rule, capacity)?;
             compiled.push(CompiledRule {
                 rule,
                 expression,
@@ -125,18 +136,16 @@ impl AlertEngine {
     }
 
     pub fn add_rule(&mut self, rule: AlertRule) -> Result<(), TrackerError> {
+        if self.rules.len() >= 256 {
+            return Err(TrackerError::InvalidInput("alert rule limit is 256".into()));
+        }
         if self.rules.iter().any(|value| value.rule.name == rule.name) {
             return Err(TrackerError::InvalidInput(format!(
                 "duplicate alert rule name {:?}",
                 rule.name
             )));
         }
-        if rule.name.trim().is_empty() || rule.for_steps == 0 {
-            return Err(TrackerError::InvalidInput(
-                "alert rule name must be nonempty and for_steps must be positive".into(),
-            ));
-        }
-        let expression = Parser::parse(&rule.condition)?;
+        let expression = validate_rule(&rule, self.capacity)?;
         self.rules.push(CompiledRule {
             rule,
             expression,
@@ -173,13 +182,21 @@ impl AlertEngine {
                         name.clone(),
                         Sample {
                             observed_at_ns,
+                            step,
                             value,
                         },
                     )
                 })
             })
             .collect();
-        self.prepare(step, observed_at_ns, metrics, samples, Some(observed_at_ns))
+        self.prepare(
+            step,
+            observed_at_ns,
+            metrics,
+            samples,
+            Some(observed_at_ns),
+            false,
+        )
     }
 
     pub(crate) fn prepare_tick(&self, step: i64, observed_at_ns: i64) -> AlertUpdate {
@@ -189,12 +206,13 @@ impl AlertEngine {
             &BTreeMap::new(),
             Vec::new(),
             self.last_observed_at_ns,
+            true,
         )
     }
 
     pub(crate) fn apply(&mut self, update: AlertUpdate) {
         for (name, sample) in update.samples {
-            let series = self.series.entry(name).or_default();
+            let series = Arc::make_mut(self.series.entry(name).or_default());
             series.push_back(sample);
             while series.len() > self.capacity {
                 series.pop_front();
@@ -206,6 +224,24 @@ impl AlertEngine {
         self.last_observed_at_ns = update.last_observed_at_ns;
     }
 
+    pub(crate) fn check_budget(
+        &self,
+        max_fields: usize,
+        max_bytes: usize,
+    ) -> Result<(), TrackerError> {
+        let bytes = self
+            .series
+            .iter()
+            .map(|(key, values)| key.len() + values.len() * std::mem::size_of::<Sample>() + 128)
+            .sum::<usize>();
+        if self.series.len() > max_fields || bytes > max_bytes {
+            return Err(TrackerError::InvalidInput(
+                "alert series cardinality/byte budget exceeded".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn prepare(
         &self,
         step: i64,
@@ -213,9 +249,10 @@ impl AlertEngine {
         metrics: &BTreeMap<String, Value>,
         samples: Vec<(String, Sample)>,
         last_observed_at_ns: Option<i64>,
+        tick: bool,
     ) -> AlertUpdate {
         let pending: BTreeMap<_, _> = samples.iter().cloned().collect();
-        let context = EvalContext {
+        let mut context = EvalContext {
             step,
             observed_at_ns,
             started_at_ns: self.started_at_ns,
@@ -223,16 +260,29 @@ impl AlertEngine {
             metrics,
             series: &self.series,
             pending: &pending,
+            partial_window: false,
+            axis: RuleAxis::WallTime,
+            tick,
         };
         let mut events = Vec::new();
         let mut states = Vec::with_capacity(self.rules.len());
         for compiled in &self.rules {
             let mut state = compiled.state.clone();
+            if tick && !touches_time(&compiled.expression) {
+                states.push(state);
+                continue;
+            }
+            context.partial_window = compiled.rule.partial_window;
+            context.axis = compiled.rule.axis;
             let truth = evaluate(&compiled.expression, &context).truth();
             match truth {
-                Tri::Unknown => {}
+                Tri::Unknown => {
+                    // Missing coverage cannot prove a continuously true duration.
+                    state.since_ns = None;
+                }
                 Tri::False => {
                     state.consecutive = 0;
+                    state.since_ns = None;
                     if state.firing {
                         state.firing = false;
                         if compiled.rule.notify_recovery {
@@ -250,8 +300,16 @@ impl AlertEngine {
                     }
                 }
                 Tri::True => {
-                    state.consecutive = state.consecutive.saturating_add(1);
-                    if state.consecutive >= compiled.rule.for_steps {
+                    if !tick && state.last_step != Some(step) {
+                        state.consecutive = state.consecutive.saturating_add(1);
+                        state.last_step = Some(step);
+                    }
+                    let since = *state.since_ns.get_or_insert(observed_at_ns);
+                    let steps_ready = state.consecutive >= compiled.rule.for_steps
+                        || (tick && compiled.rule.for_steps == 1);
+                    let duration_ready = observed_at_ns.saturating_sub(since)
+                        >= (compiled.rule.for_duration_ms as i64).saturating_mul(1_000_000);
+                    if steps_ready && duration_ready {
                         let edge_blocked = compiled.rule.mode == AlertMode::Edge && state.firing;
                         let cooldown_ns =
                             (compiled.rule.cooldown_seconds as i64).saturating_mul(1_000_000_000);
@@ -262,8 +320,8 @@ impl AlertEngine {
                             .rule
                             .max_fires
                             .is_some_and(|limit| state.fires >= limit);
-                        state.firing = true;
                         if !edge_blocked && !cooling && !exhausted {
+                            state.firing = true;
                             state.fires = state.fires.saturating_add(1);
                             state.last_fire_ns = Some(observed_at_ns);
                             events.push(AlertEvent {
@@ -297,6 +355,100 @@ impl AlertEngine {
     }
 }
 
+fn validate_rule(rule: &AlertRule, capacity: usize) -> Result<Expr, TrackerError> {
+    if rule.name.trim().is_empty()
+        || rule.name.len() > 256
+        || rule.for_steps == 0
+        || rule.message.len() > 4096
+        || rule.for_duration_ms > 86_400_000
+        || rule.cooldown_seconds > 31_536_000
+    {
+        return Err(TrackerError::InvalidInput(
+            "invalid alert rule name/persistence/message limits".into(),
+        ));
+    }
+    for fields in [&rule.tags, &rule.channels] {
+        if fields.len() > 256 || fields.iter().any(|s| s.len() > 256 || s.contains('\0')) {
+            return Err(TrackerError::InvalidInput(
+                "invalid rule routing/tag budget".into(),
+            ));
+        }
+    }
+    let expression = Parser::parse(&rule.condition)?;
+    expression.validate(capacity)?;
+    if rule.for_duration_ms > 0 && !touches_time(&expression) {
+        return Err(TrackerError::InvalidInput(
+            "for_duration_ms requires an explicit time condition (age/no_data/elapsed)".into(),
+        ));
+    }
+    Ok(expression)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReplayInput {
+    Step {
+        step: i64,
+        observed_at_ns: i64,
+        metrics: BTreeMap<String, Value>,
+    },
+    Tick {
+        step: i64,
+        observed_at_ns: i64,
+    },
+}
+
+pub fn replay(
+    rules: Vec<AlertRule>,
+    started_at_ns: i64,
+    capacity: usize,
+    inputs: Vec<ReplayInput>,
+) -> Result<Vec<AlertEvent>, TrackerError> {
+    if inputs.len() > 100_000 {
+        return Err(TrackerError::InvalidInput(
+            "replay exceeds 100000 inputs".into(),
+        ));
+    }
+    let mut engine = AlertEngine::new(rules, started_at_ns, capacity)?;
+    let mut events = Vec::new();
+    let mut last = started_at_ns;
+    for input in inputs {
+        let (step, observed, update) = match input {
+            ReplayInput::Step {
+                step,
+                observed_at_ns,
+                metrics,
+            } => (
+                step,
+                observed_at_ns,
+                engine.prepare_step(step, observed_at_ns, &metrics),
+            ),
+            ReplayInput::Tick {
+                step,
+                observed_at_ns,
+            } => (
+                step,
+                observed_at_ns,
+                engine.prepare_tick(step, observed_at_ns),
+            ),
+        };
+        if step < 0 || observed < last {
+            return Err(TrackerError::InvalidInput(
+                "replay requires nonnegative steps and ordered observation times".into(),
+            ));
+        }
+        last = observed;
+        events.extend_from_slice(update.events());
+        engine.apply(update);
+        engine.check_budget(4096, 64 * 1024 * 1024)?;
+        if events.len() > 100_000 {
+            return Err(TrackerError::InvalidInput(
+                "replay output exceeds 100000 events".into(),
+            ));
+        }
+    }
+    Ok(events)
+}
 fn render_message(
     rule: &AlertRule,
     step: i64,
@@ -359,6 +511,9 @@ fn format_metric(value: &Value, format: Option<&str>) -> String {
     else {
         return number.to_string();
     };
+    if precision > 20 {
+        return number.to_string();
+    }
     match format.chars().last() {
         Some('f') => format!("{number:.precision$}"),
         Some('e') => format!("{number:.precision$e}"),

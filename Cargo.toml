@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "rust/rvx-cli",
+  "rust/rvx-alert-http",
   "rust/rvx-config",
   "rust/rvx-core",
   "rust/rvx-snapshots",
