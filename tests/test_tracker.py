@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from rvx import tracker as et
 
@@ -164,6 +164,28 @@ class TrackerSdkTests(unittest.TestCase):
         self.assertTrue(run.endpoint.startswith("http://"))
         history = json.loads(run.history_bytes())
         self.assertEqual(history["snapshots"][0]["state"]["metrics"]["loss"], 0.5)
+
+    def test_tracker_accepts_a_role_specific_step_axis(self):
+        run = et.init(
+            project="demo",
+            name="axis",
+            run_id="axis",
+            step_axis="trainer/step",
+        )
+        et.log({"loss": 0.5}, step=7, commit=True)
+
+        snapshot = json.loads(run.latest_bytes())
+
+        self.assertEqual(snapshot["axes"], {"trainer/step": 7})
+
+    def test_module_log_preserves_receipt_and_explicit_timestamp(self):
+        run = et.init(project="demo", name="timestamp", step_axis="trainer/step")
+        result = et.log({"loss": 0.5}, step=7, commit=True, observed_at_ns=123456789)
+        snapshot = json.loads(run.latest_bytes())
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["capture"]["next_sequence"], 1)
+        self.assertEqual(snapshot["axes"], {"trainer/step": 7})
+        self.assertEqual(snapshot["observed_at_ns"], 123456789)
 
     def test_span_decorator_records_native_timing(self):
         run = et.init(project="demo", name="decorator", run_id="decorator")
@@ -376,6 +398,26 @@ class TrackerSdkTests(unittest.TestCase):
             self.assertEqual(run.step, 11)
         finally:
             run.close()
+
+    def test_span_exposes_completed_duration(self):
+        et.init(project="demo", name="duration", run_id="duration")
+
+        with et.span("work") as span:
+            pass
+
+        self.assertGreaterEqual(span.duration_ms, 0)
+
+    def test_completed_span_duration_survives_repeated_end(self):
+        run = et.init(project="demo", name="retained-duration")
+        for owner in (None, run):
+            with self.subTest(native=owner is not None):
+                span = et.Span(owner, "work", {}).begin()
+                self.assertEqual(span.duration_ms, 0)
+                duration = span.end()
+                self.assertGreater(duration, 0)
+                self.assertEqual(span.duration_ms, duration)
+                self.assertEqual(span.end(), 0)
+                self.assertEqual(span.duration_ms, duration)
 
 
 if __name__ == "__main__":

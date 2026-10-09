@@ -47,6 +47,7 @@ class Run:
         capacity: int = 1_024,
         max_buffer_bytes: int = 64 * 1024 * 1024,
         history_steps: int = 1_024,
+        step_axis: str = "step",
         step_policy: str = "monotonic",
         span_count: bool = False,
         alert_window: int = 1_024,
@@ -100,7 +101,7 @@ class Run:
             "schema_version": 1,
         }
         options = {
-            "step_axis": "step",
+            "step_axis": step_axis,
             "history_steps": history_steps,
             "step_policy": step_policy,
             "span_count": span_count,

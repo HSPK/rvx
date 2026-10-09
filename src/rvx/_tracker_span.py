@@ -44,6 +44,12 @@ class Span:
         self._fallback_started_ns = 0
         self._ended = False
         self._identity = id(self)
+        self._duration_ms = 0.0
+
+    @property
+    def duration_ms(self) -> float:
+        """Return the completed duration, or zero before the span ends."""
+        return self._duration_ms
 
     def begin(self) -> Span:
         if self._native_span is not None or self._fallback_started_ns:
@@ -81,8 +87,12 @@ class Span:
             if result is not None and not result["result"]["accepted"]:
                 import warnings
                 warnings.warn(result["result"]["reason"], RuntimeWarning, stacklevel=2)
-            return 0.0 if result is None else result["duration_ms"]
-        return (time.perf_counter_ns() - self._fallback_started_ns) / 1_000_000
+            self._duration_ms = 0.0 if result is None else result["duration_ms"]
+        else:
+            self._duration_ms = (
+                time.perf_counter_ns() - self._fallback_started_ns
+            ) / 1_000_000
+        return self._duration_ms
 
     def __enter__(self) -> Span:
         return self.begin()
@@ -100,6 +110,7 @@ class Span:
 
     def __call__(self, function):
         if inspect.iscoroutinefunction(function):
+
             @functools.wraps(function)
             async def async_wrapper(*args, **kwargs):
                 async with Span(

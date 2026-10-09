@@ -39,7 +39,6 @@ def _finish_at_exit() -> None:
 atexit.register(_finish_at_exit)
 
 
-
 def init(
     project: str,
     name: str | None = None,
@@ -76,8 +75,16 @@ def _require_run() -> Run:
     return _active_run
 
 
-def log(data: Mapping[str, Any], step: int | None = None, commit: bool | None = None):
-    return _require_run().log(data, step=step, commit=commit)
+def log(
+    data: Mapping[str, Any],
+    step: int | None = None,
+    commit: bool | None = None,
+    *,
+    observed_at_ns: int | None = None,
+):
+    return _require_run().log(
+        data, step=step, commit=commit, observed_at_ns=observed_at_ns,
+    )
 
 
 def history(n: int | None = 50, **kwargs):
