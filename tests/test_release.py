@@ -30,6 +30,7 @@ class ReleaseContractTests(unittest.TestCase):
         files = {
             "rvx/__init__.py": "",
             "rvx/source.py": "",
+            "rvx/client.py": "",
             "rvx/adapters.py": "",
             "rvx/service.py": "",
             "rvx/tracker.py": "",
@@ -75,6 +76,7 @@ class ReleaseContractTests(unittest.TestCase):
                 ("rvx-0.1.0.data/data/share/rvx/web/index.html",),
                 ("rvx-0.1.0.data/data/share/rvx/web/assets/app.js",),
                 ("rvx/_native.abi3.so",),
+                ("rvx/client.py",),
                 ("rvx-0.1.0.data/data/share/rvx/web/login/index.html",),
                 ("rvx-0.1.0.data/data/share/rvx/web/login/assets/login.js",),
             ):

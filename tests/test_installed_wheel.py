@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 import urllib.request
 
 import rvx
-from rvx import RvxError, RvxService, RvxSettings, Source
+from rvx import RvxClient, RvxError, RvxService, RvxSettings, Source
 from tests.http_api import api_request
 
 
@@ -36,7 +36,7 @@ class InstalledWheelTests(unittest.TestCase):
         self.assertEqual(RvxSource.__module__, "rvx._native")
         self.assertEqual(RvxTracker.__module__, "rvx._native")
         self.assertEqual(RvxTrackerSpan.__module__, "rvx._native")
-        self.assertTrue(all(callable(value) for value in (Source, RvxService, RvxSettings, RvxError)))
+        self.assertTrue(all(callable(value) for value in (Source, RvxClient, RvxService, RvxSettings, RvxError)))
         metadata = distribution("rvx")
         self.assertEqual(metadata.metadata["Author"], "hspk")
         self.assertEqual(metadata.metadata["License-Expression"], "MIT")

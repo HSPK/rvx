@@ -47,7 +47,14 @@ uv tool install rvx
 rvx serve --data-dir /absolute/path/to/rvx-data
 ```
 
-Version `0.3.0` moves the control CLI and terminal dashboard fully into Rust
+Version `0.4.0` adds atomic tracker commits, explicit durable acknowledgments,
+versioned observation/event semantics, bounded asynchronous alert delivery,
+validated artifact lineage, responsive TUI refreshes, and bounded-memory trace
+export. It preserves the remote SDK client, custom training axes, and span
+durations from `0.3.0`. Unsupported tracker compatibility options now fail
+explicitly rather than being silently ignored.
+
+Version `0.3.0` moved the control CLI and terminal dashboard fully into Rust
 and adds the native step tracker, alert engine, spans, trace export, and artifact
 lineage. Python remains only for the SDK and framework adapters. Version
 `0.2.0` introduced the charts-first Web workspace and browser sign-in.

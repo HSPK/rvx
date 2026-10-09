@@ -65,7 +65,7 @@ tag is selected as its ref.
    in `Cargo.toml` to the same stable `MAJOR.MINOR.PATCH` value; refresh locks.
 2. Commit and push the preparation, then complete CI and a manual Release build
    on that exact commit.
-3. Push an exact matching tag on the verified release commit, e.g. `v0.3.0`.
+3. Push an exact matching tag on the verified release commit, e.g. `v0.4.0`.
 
 Only a pushed `v*` tag can reach the PyPI job. A tag that differs from the
 package version fails before building. Every platform must succeed before
@@ -89,7 +89,7 @@ python scripts/package_assets.py \
   --daemon-binary target/release/rvxd \
   --ui web/dist
 uv run maturin build --release --locked --out dist
-python scripts/check_wheel.py --version 0.3.0 dist/*.whl
+python scripts/check_wheel.py --version 0.4.0 dist/*.whl
 ```
 
 Local Linux wheels built outside manylinux are useful for local smoke tests,

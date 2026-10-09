@@ -26,7 +26,7 @@ def request(base: str, path: str, payload: dict | None = None):
 def smoke() -> None:
     """Prove the installed wheel contains a runnable native daemon, UI, and producer."""
     import rvx
-    from rvx import Source, tracker
+    from rvx import RvxClient, Source, tracker
 
     if not Path(rvx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
         raise RuntimeError("smoke must import an installed wheel, not the source checkout")
@@ -35,11 +35,15 @@ def smoke() -> None:
         experiment="native-tracker",
         name="tracker",
         run_id="tracker",
+        step_axis="trainer/step",
         alert_rules=["loss > 1 => error: high"],
     )
     try:
-        tracked.log({"loss": 2.0})
-        tracked_state = json.loads(tracked.latest_bytes())["state"]
+        tracked.log({"loss": 2.0}, step=7, commit=True)
+        tracked_snapshot = json.loads(tracked.latest_bytes())
+        tracked_state = tracked_snapshot["state"]
+        if tracked_snapshot["axes"] != {"trainer/step": 7}:
+            raise RuntimeError("installed tracker lost its custom training axis")
         if tracked_state["alerts"][0]["message"] != "high":
             raise RuntimeError("native tracker alert did not reach its snapshot")
     finally:
@@ -67,13 +71,11 @@ def smoke() -> None:
                 with urllib.request.urlopen(base + asset, timeout=5) as response:
                     if not response.read():
                         raise RuntimeError(f"empty bundled UI asset: {asset}")
-            project = request(base, "/api/experiments/projects", {"name": "wheel-smoke"})
-            experiment = request(base, "/api/experiments/experiments", {
-                "project_id": project["id"], "name": "installed",
-            })
-            run = request(base, "/api/experiments/runs", {
-                "experiment_id": experiment["id"], "name": "packaged", "config": {},
-            })
+            client = RvxClient(base)
+            hierarchy = client.ensure_hierarchy("wheel-smoke", "installed", "packaged")
+            if client.ensure_hierarchy("wheel-smoke", "installed", "packaged") != hierarchy:
+                raise RuntimeError("installed remote client did not reuse the hierarchy")
+            run = hierarchy["run"]
             with Source(
                 project="wheel-smoke", experiment="installed", run_id=run["id"], role="learner",
             ) as source:
