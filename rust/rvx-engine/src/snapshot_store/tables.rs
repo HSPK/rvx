@@ -286,8 +286,8 @@ impl SnapshotStore {
                 ids.push(number);
             }
         }
-        // Reuse the single SnapshotStore owner, not a second Engine or independent SQLite reader.
-        let connection = self.connection.lock();
+        let reader = self.reader.lock();
+        let connection = reader.unchecked_transaction()?;
         control.check()?;
         if pinned.is_none() {
             let mut heads = connection.prepare_cached(

@@ -111,6 +111,19 @@ and committed atomically with raw state and cursor advancement. Absent indexes
 are rebuilt from valid stored snapshots without changing IDs or inventing data.
 No scalar WAL/Parquet readers or legacy query APIs remain.
 
+Chart-index version 3 uses composite-primary-key `WITHOUT ROWID` storage for
+`chart_values` and `chart_axes`. Older derived indexes are rebuilt on open;
+raw observation/event JSON, storage IDs, Source cursors and latest heads retain
+their semantics. This is an index-layout upgrade, not a snapshot wire-version
+change or a relaxation of query limits.
+
+Concurrent Source pages may share a bounded grouped commit, with a savepoint
+per page. A failed page rolls back all of its raw and derived writes; no
+acknowledgment is returned before the durable commit. Empty/duplicate pages do
+not refresh the stored cursor timestamp. Viewer queries use an Engine-owned
+read-only WAL connection and multi-statement reads retain a consistent
+transaction snapshot rather than blocking the writer connection.
+
 ## Consumer APIs
 
 `POST /api/snapshots/ack` accepts `run_id`, `source_id`, `source_session_id`

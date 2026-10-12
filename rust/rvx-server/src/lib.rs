@@ -186,6 +186,7 @@ pub fn application_with_access_and_connections(
         .nest_service("/assets", ServeDir::new(ui_directory.join("assets")))
         .route("/healthz", get(health))
         .route("/api/experiments/stats", get(stats))
+        .route("/api/experiments/ingestion", get(ingestion_diagnostics))
         .route(
             "/api/experiments/projects",
             get(projects).post(create_project),
@@ -247,6 +248,10 @@ async fn health() -> &'static str {
 
 async fn stats(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     blocking(move || Ok(serde_json::to_value(state.engine.stats()?)?)).await
+}
+
+async fn ingestion_diagnostics(State(state): State<AppState>) -> Json<rvx_core::IngestionDiagnostics> {
+    Json(state.engine.ingestion_diagnostics())
 }
 
 async fn projects(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

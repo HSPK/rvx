@@ -7,6 +7,8 @@ use rvx_core::{new_id, now_ns, Experiment, Project, Run, RunStatus, Source, Sour
 use crate::{EngineError, Result};
 
 mod auth;
+#[cfg(test)]
+mod tests;
 mod ui;
 
 pub struct Repository {
@@ -573,40 +575,57 @@ impl Repository {
         Ok(source)
     }
 
-    pub fn update_source_success(
+    pub(crate) fn update_source_success_batch(
         &self,
-        source_id: &str,
-        descriptor: &rvx_core::SnapshotDescriptor,
-        timestamp_ns: i64,
+        sources: &[(&str, &rvx_core::SnapshotDescriptor)],
+        timing: &mut crate::diagnostics::WriteTiming,
     ) -> Result<()> {
-        let encoded = serde_json::to_string(descriptor)?;
-        let mut connection = self.connection.lock();
+        use crate::diagnostics::measure;
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let mut connection = measure(&mut timing.lock_wait, || self.connection.lock());
         let transaction = connection.transaction()?;
-        transaction.execute(
-            "UPDATE sources SET state='active', source_session_id=?2,
+        measure(&mut timing.execute, || -> Result<()> {
+            let timestamp_ns = now_ns();
+            for (source_id, descriptor) in sources {
+                let encoded = serde_json::to_string(descriptor)?;
+                transaction
+                    .prepare_cached(
+                        "UPDATE sources SET state='active', source_session_id=?2,
              last_success_at_ns=?3, last_error=NULL
              WHERE id=?1 AND EXISTS (
                  SELECT 1 FROM runs
                  WHERE runs.id=sources.run_id
                    AND runs.status IN ('created', 'running')
              ) AND state NOT IN ('draining', 'ended', 'lost')",
-            params![source_id, descriptor.source_session_id, timestamp_ns],
-        )?;
-        transaction.execute(
-            "INSERT INTO source_descriptors(source_id, descriptor_json, updated_at_ns)
+                    )?
+                    .execute(params![
+                        source_id,
+                        descriptor.source_session_id,
+                        timestamp_ns
+                    ])?;
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO source_descriptors(source_id, descriptor_json, updated_at_ns)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(source_id) DO UPDATE SET
                 descriptor_json=excluded.descriptor_json,
-                updated_at_ns=excluded.updated_at_ns",
-            params![source_id, encoded, timestamp_ns],
-        )?;
-        transaction.execute(
-            "UPDATE runs SET status='running', updated_at_ns=?2
+                updated_at_ns=excluded.updated_at_ns
+             WHERE source_descriptors.descriptor_json<>excluded.descriptor_json",
+                    )?
+                    .execute(params![source_id, encoded, timestamp_ns])?;
+                transaction
+                    .prepare_cached(
+                        "UPDATE runs SET status='running', updated_at_ns=?2
              WHERE status='created'
                AND id=(SELECT run_id FROM sources WHERE id=?1)",
-            params![source_id, timestamp_ns],
-        )?;
-        transaction.commit()?;
+                    )?
+                    .execute(params![source_id, timestamp_ns])?;
+            }
+            Ok(())
+        })?;
+        measure(&mut timing.commit, || transaction.commit())?;
         Ok(())
     }
 

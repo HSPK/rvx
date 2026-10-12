@@ -70,17 +70,69 @@ page through the same bounded concurrency pool. An empty page ends catch-up
 and resumes the configured polling interval; failures also use that interval.
 This handles count- and byte-limited pages without silently capping collection
 at 64 snapshots per polling interval.
+When all scrape slots are occupied, scheduling waits for completion or
+discovery/shutdown events rather than repeatedly waking every millisecond.
+Registry discovery and failure writes run outside Tokio's async worker threads.
 
 Raw states and new snapshot cursors live in a separate native-owned SQLite WAL
 store. Metadata retains the existing Run/Source hierarchy and lifecycle.
 Snapshot persistence and cursor advancement are transactional; numeric
 projections do not create another primary data stream.
 
+An Engine-owned writer groups pending pages from different Sources after a
+two-millisecond collection window. Each group is bounded by 64 pages, 1,024
+records, and 16.25 MiB of serialized page/descriptor data. Outstanding admitted
+work shares a 32.5 MiB byte budget and a bounded channel; this wire-size
+accounting is not a whole-process RSS limit. Every page has an independent
+SQLite savepoint, so a rejected page cannot leave partial raw snapshots,
+indexes, gaps, or cursor changes. Successful pages share the durable snapshot
+commit, then Source health/descriptor updates share a metadata transaction.
+SQLite remains in WAL/FULL mode; success is returned only after both commits.
+The two databases are not a single atomic transaction: if metadata persistence
+fails after snapshot commit, the scrape fails explicitly and retry remains
+idempotent. No successful cursor advancement is invented.
+
+The snapshot writer checkpoints automatically after 65,536 WAL pages rather
+than SQLite's default 1,000. This amortizes foreground checkpoint work without
+reducing the durability of individual WAL/FULL commits. With the usual 4 KiB
+database pages, the trigger is approximately 256 MiB of page payload, plus WAL
+frame overhead; it is not a hard file-size limit. A large transaction or a long
+reader can exceed it, and SQLite may retain the allocated WAL file for reuse.
+Allow this disk headroom per daemon. SQLite can checkpoint on final close,
+but copy the complete stopped data directory, including any remaining WAL
+sidecars; do not assume the main `.db` file is a standalone backup. Committed
+WAL frames are recovered normally after a crash.
+
+Empty pages and exact duplicates still undergo protocol validation but do not
+rewrite snapshot cursors. Source health remains persistent and is not silently
+throttled. Unchanged descriptor JSON is not rewritten; changed identity and
+labels remain immediately persistent. Cancelled callers do not release
+per-Source ownership of admitted writes; the writer drains accepted work on
+orderly shutdown.
+
+The same SnapshotStore owns a separate read-only WAL connection for viewer
+queries. Multi-statement projections, catalogs, artifacts and table reads use
+consistent read transactions, allowing ingestion to proceed without taking the
+viewer mutex. This is not a second Engine or another primary store. Viewer
+queries still share one read connection; a large read can delay other reads,
+and existing query cardinality/byte limits remain enforced.
+
 The numeric field/value/axis index is rebuildable from complete stored
 snapshots. It avoids parsing raw historical documents for ordinary chart
 requests and commits with the raw capture and cursor. It is not an independent
 metric store or ingestion channel. Scalar WAL/hot/Parquet readers and their
 compatibility APIs are removed; archived scalar files are not loaded.
+
+Derived chart-index version 3 stores numeric values and logical axes in
+`WITHOUT ROWID` tables keyed by `(snapshot_id, path/name)`. This avoids storing
+both a rowid table and a duplicate composite-key index for every numeric
+observation. Raw snapshots, their IDs, events, cursors, and query budgets are
+unchanged. Opening an older index rebuilds the derived chart tables from raw
+snapshots before serving requests, so first startup after upgrade can take
+longer and needs working disk space. Back up the complete data directory
+before upgrading. Existing database files do not automatically shrink:
+freed pages are reusable, and reported logical page counts differ from the
+main file length when a WAL is present.
 
 ## Code map
 
@@ -348,6 +400,24 @@ deleted nor backfilled; the snapshot-only runtime does not read those archives.
 
 ## Performance evidence and limits
 
+`GET /api/experiments/ingestion` exposes authenticated, process-lifetime writer
+diagnostics without querying either database or returning Source identities.
+It reports groups, pages, empty pages, input/committed records, failed pages,
+serialized bytes, and maximum group sizes. Admission/queue wait and each
+database's lock-wait, execute and commit phases report `count`, `total_us`,
+`max_us`, and 32 fixed histogram buckets. Bucket zero is zero microseconds;
+buckets 1..30 cover `[2^(i-1), 2^i)` microseconds, and bucket 31 includes all
+values at least `2^30`. No unbounded sample history is retained.
+
+Counters reset with the Engine. Compare counter/histogram deltas within one
+process to isolate a workload; maxima are lifetime maxima, not interval
+maxima. In-flight groups can appear in page counts before their committed
+records and phase timings appear. `committed_records` describes the durable
+snapshot commit even if a later metadata commit fails; `failed_pages` still
+reports that scrape failure. COMMIT timing includes SQLite's automatic
+checkpoint work, not just the WAL fsync syscall. Histogram-derived percentiles
+are ranges, not exact timings.
+
 The snapshot architecture preserves full-state fidelity at the cost of larger
 payloads and derived-index write work. Serialized size, nesting, nodes, page size, count
 retention, and byte retention are bounded. Those bounds are not a throughput
@@ -438,3 +508,64 @@ daemon Tokio workers at four. Payload combinations have an estimated 2 GiB
 serialized-volume guard and a 1 GiB per-Source buffer ceiling; these are not a
 whole-process RSS guarantee. These tests establish neither GPU/multi-node
 behavior nor long-duration reliability or production SLAs.
+
+### Thousand-card role simulations
+
+`tests/fleet_simulation.py` models one experiment/Run and one daemon with
+1,024 distinct per-card native HTTP Source endpoints. It uses eight Python
+producer processes, with one native HTTP runtime per Source, not 1,024 Python
+processes or GPUs. Every Source has its own Session, buffer, rank, and endpoint;
+synthetic node labels group eight ranks but do not simulate a network.
+
+```bash
+uv run --no-sync python -m tests.fleet_simulation \
+  --scenario trainer --cards 1024 --workers 8 --duration 60 \
+  --trainer-hz 1 --rollout-hz 1 --scrape-concurrency 16 \
+  --timeout 900 --report .build/fleet-trainer.json
+uv run --no-sync python -m tests.fleet_simulation \
+  --scenario rollout --cards 1024 --workers 8 --duration 60 \
+  --trainer-hz 1 --rollout-hz 1 --scrape-concurrency 16 \
+  --timeout 900 --report .build/fleet-rollout.json
+uv run --no-sync python -m tests.fleet_simulation \
+  --scenario mixed --cards 1024 --trainers 128 --duration 60 \
+  --trainer-hz 1 --rollout-hz 1 --scrape-concurrency 16 \
+  --timeout 900 --report .build/fleet-mixed.json
+```
+
+Trainer observations contain 12 metric fields and exercise staged then
+committed `log()` calls, summary, and a final lifecycle event. Rollout
+observations contain 12 metric fields and, by default, 16 structured request
+rows including exact unsigned integers. Publishers are phase-staggered at the
+configured per-card rate; publisher lateness is recorded, not silently skipped.
+The HTTP scrape interval defaults to one second. Change
+`--scrape-interval-ms` independently of the publication rates when comparing
+batching and idle-poll costs.
+
+The default query load targets two requests per second across two bounded
+clients. Catalog reads cover the whole Run; history/latest/numeric queries
+select up to 16 evenly spaced ranks. Arrival misses and late starts remain
+visible. After production finishes, the fixture keeps every endpoint alive
+until the daemon drains the backlog or the deadline expires.
+
+Reports separate registration time, producer duration, drain time, daemon and
+producer resources, query latency, and observation-to-ingestion lag.
+`--profile-ingestion` additionally saves writer diagnostics before/after
+production; omit it when benchmarking older daemons without that endpoint.
+The daemon sampler also records peak allocated snapshot/metadata WAL file
+sizes, not just process RSS. File length can include reusable checkpointed
+frames, so it is not the amount of uncheckpointed data.
+Offline verification also reports SQLite page count/size and the main file
+length. Use `page_count * page_size` for logical database size; the main file
+alone may exclude pages still represented by a retained WAL.
+`ingested_at_ns` is recorded before SQLite transaction commit, so this lag is
+not a per-record fsync acknowledgment. Once the daemon stops, the fixture
+verifies every stored observation, sequence, Session, cursor, and latest head,
+then reopens the dataset with collection disabled for query-limit probes.
+It never accesses a live daemon's database directly.
+
+**A passed campaign means data correctness, not real-time capacity.** A Run
+catalog may explicitly truncate field/Source pairs, and table operations may
+reject an unfiltered thousand-Source scope. These are reported separately
+from ingestion integrity. All results are single-host simulations on the
+current filesystem; they do not establish distributed-network behavior,
+real training overhead, or long-running retention safety.

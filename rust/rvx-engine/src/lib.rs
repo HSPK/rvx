@@ -1,6 +1,8 @@
 mod artifact_index;
 mod auth_sessions;
 mod chart_index;
+mod diagnostics;
+mod ingestion;
 mod repository;
 mod snapshot_store;
 mod snapshot_views;
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvx_core::{
-    new_id, now_ns, validate_snapshot_descriptor, ArtifactLineagePage, ArtifactLineageRequest,
+    new_id, validate_snapshot_descriptor, ArtifactLineagePage, ArtifactLineageRequest,
     ArtifactResolveRequest, ArtifactResolveResponse, ChartCatalogRequest, ChartCatalogResponse,
     EngineStats, Experiment, Project, Run, RunStatus, SnapshotDescriptor, SnapshotDiffRequest,
     SnapshotDiffResponse, SnapshotHistoryPage, SnapshotHistoryRequest, SnapshotHistoryResponse,
@@ -27,7 +29,7 @@ use rvx_core::{
     TableSummaryResponse,
 };
 use thiserror::Error;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
 
@@ -70,8 +72,9 @@ struct Counters {
 }
 
 pub struct Engine {
-    repository: Repository,
-    snapshots: SnapshotStore,
+    repository: Arc<Repository>,
+    snapshots: Arc<SnapshotStore>,
+    ingestion: ingestion::Ingestor,
     scrape_owners: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     client: reqwest::Client,
     counters: Counters,
@@ -81,11 +84,13 @@ impl Engine {
     pub fn open(directory: impl AsRef<Path>) -> Result<Arc<Self>> {
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory)?;
-        let repository = Repository::open(&directory.join("metadata.db"))?;
-        let snapshots = SnapshotStore::open(&directory.join("snapshots.db"))?;
+        let repository = Arc::new(Repository::open(&directory.join("metadata.db"))?);
+        let snapshots = Arc::new(SnapshotStore::open(&directory.join("snapshots.db"))?);
+        let ingestion = ingestion::Ingestor::new(snapshots.clone(), repository.clone())?;
         let engine = Arc::new(Self {
             repository,
             snapshots,
+            ingestion,
             scrape_owners: parking_lot::Mutex::new(HashMap::new()),
             client: reqwest::Client::builder()
                 .pool_idle_timeout(Duration::from_secs(60))
@@ -255,6 +260,10 @@ impl Engine {
             cursor_gaps: self.snapshots.gap_count()?,
             scrape_failures: self.counters.scrape_failures.load(Ordering::Relaxed),
         })
+    }
+
+    pub fn ingestion_diagnostics(&self) -> rvx_core::IngestionDiagnostics {
+        self.ingestion.diagnostics()
     }
 
     pub fn snapshot_latest(
@@ -446,19 +455,7 @@ impl Engine {
                 rvx_core::MAX_SNAPSHOT_PAGE_BYTES,
             )
             .await?;
-        // The transaction validates descriptor/history session agreement before any cursor write.
-        let engine = self.clone();
-        tokio::task::spawn_blocking(move || {
-            // Keep ownership through native commit even if the awaiting async task is cancelled.
-            let _owner = owner;
-            let accepted = engine.snapshots.ingest(&source, &descriptor, &page)?;
-            engine
-                .repository
-                .update_source_success(&source.id, &descriptor, now_ns())?;
-            Ok(accepted)
-        })
-        .await
-        .map_err(|e| EngineError::Runtime(e.to_string()))?
+        self.ingestion.commit(source, descriptor, page, owner).await
     }
 
     async fn pull_json<T: serde::de::DeserializeOwned>(
@@ -496,14 +493,15 @@ impl Engine {
         maximum_concurrency: usize,
         mut shutdown: watch::Receiver<bool>,
     ) {
-        let semaphore = Arc::new(Semaphore::new(maximum_concurrency.max(1)));
+        let maximum_concurrency = maximum_concurrency.max(1);
         let mut sources: HashMap<String, Source> = HashMap::new();
         let mut schedule: BinaryHeap<Reverse<(Instant, String)>> = BinaryHeap::new();
         let mut scheduled: HashSet<String> = HashSet::new();
         let mut tasks: JoinSet<(Source, bool)> = JoinSet::new();
         let mut discovery = interval(Duration::from_secs(1));
         discovery.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        self.refresh_schedule(&mut sources, &mut schedule, &mut scheduled);
+        self.refresh_schedule(&mut sources, &mut schedule, &mut scheduled)
+            .await;
         loop {
             while let Some(result) = tasks.try_join_next() {
                 if let Ok((source, has_data)) = result {
@@ -513,20 +511,16 @@ impl Engine {
                 }
             }
             let now = Instant::now();
-            while schedule.peek().is_some_and(|entry| entry.0 .0 <= now) {
+            while tasks.len() < maximum_concurrency
+                && schedule.peek().is_some_and(|entry| entry.0 .0 <= now)
+            {
                 let Reverse((_, source_id)) = schedule.pop().unwrap();
                 scheduled.remove(&source_id);
                 let Some(source) = sources.get(&source_id).cloned() else {
                     continue;
                 };
-                let Ok(permit) = semaphore.clone().try_acquire_owned() else {
-                    scheduled.insert(source_id.clone());
-                    schedule.push(Reverse((now + Duration::from_millis(1), source_id)));
-                    break;
-                };
                 let engine = self.clone();
                 tasks.spawn(async move {
-                    let _permit = permit;
                     let has_data = match engine.scrape_source(&source).await {
                         Ok(accepted) => accepted > 0,
                         Err(error) => {
@@ -534,13 +528,17 @@ impl Engine {
                                 .counters
                                 .scrape_failures
                                 .fetch_add(1, Ordering::Relaxed);
-                            if let Err(storage_error) = engine
-                                .repository
-                                .update_source_failure(&source.id, &error.to_string())
-                            {
+                            let repository = engine.repository.clone();
+                            let source_id = source.id.clone();
+                            let failure = error.to_string();
+                            let stored = tokio::task::spawn_blocking(move || {
+                                repository.update_source_failure(&source_id, &failure)
+                            })
+                            .await;
+                            if !matches!(&stored, Ok(Ok(()))) {
                                 eprintln!(
-                                    "Rvx could not persist scrape failure for {}: {}",
-                                    source.id, storage_error
+                                    "Rvx could not persist scrape failure for {}: {:?}",
+                                    source.id, stored
                                 );
                             }
                             false
@@ -554,13 +552,13 @@ impl Engine {
                 .map(|entry| entry.0 .0)
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
             tokio::select! {
-                _ = sleep_until(wake_at) => {}
+                _ = sleep_until(wake_at), if tasks.len() < maximum_concurrency => {}
                 _ = discovery.tick() => {
                     self.refresh_schedule(
                         &mut sources,
                         &mut schedule,
                         &mut scheduled,
-                    );
+                    ).await;
                 }
                 result = tasks.join_next(), if !tasks.is_empty() => {
                     if let Some(Ok((source, has_data))) = result {
@@ -589,19 +587,21 @@ impl Engine {
         }
     }
 
-    fn refresh_schedule(
+    async fn refresh_schedule(
         &self,
         sources: &mut HashMap<String, Source>,
         schedule: &mut BinaryHeap<Reverse<(Instant, String)>>,
         scheduled: &mut HashSet<String>,
     ) {
-        let discovered = match self.list_sources(None) {
-            Ok(sources) => sources,
-            Err(error) => {
-                eprintln!("Rvx scraper could not list sources: {error}");
-                return;
-            }
-        };
+        let repository = self.repository.clone();
+        let discovered =
+            match tokio::task::spawn_blocking(move || repository.list_sources(None)).await {
+                Ok(Ok(sources)) => sources,
+                error => {
+                    eprintln!("Rvx scraper could not list sources: {error:?}");
+                    return;
+                }
+            };
         for source in discovered {
             if matches!(
                 source.state,

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use rvx_core::*;
 use serde_json::Value;
 
@@ -10,7 +10,7 @@ pub(crate) const MAX_SOURCE_FIELDS: usize = 4096;
 const MAX_OBJECT_FIELDS: usize = 256;
 const MAX_DISCOVERY_NODES: usize = 8192;
 const MAX_CATALOG_REPORTERS: usize = 16_384;
-const INDEX_VERSION: i64 = 2;
+const INDEX_VERSION: i64 = 3;
 
 /// Only derived tables are rebuilt; raw snapshots, IDs, heads and cursors never change.
 pub(crate) fn initialize(connection: &mut Connection) -> Result<bool> {
@@ -47,10 +47,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<bool> {
              CREATE INDEX chart_field_reporters ON chart_fields(run_id,path,source_id);
              CREATE TABLE chart_values(
                 snapshot_id INTEGER NOT NULL REFERENCES snapshots(id), path TEXT NOT NULL,
-                value REAL NOT NULL, PRIMARY KEY(snapshot_id,path));
+                value REAL NOT NULL, PRIMARY KEY(snapshot_id,path)) WITHOUT ROWID;
              CREATE TABLE chart_axes(
                 snapshot_id INTEGER NOT NULL REFERENCES snapshots(id), name TEXT NOT NULL,
-                value INTEGER NOT NULL, PRIMARY KEY(snapshot_id,name));
+                value INTEGER NOT NULL, PRIMARY KEY(snapshot_id,name)) WITHOUT ROWID;
              CREATE TABLE chart_observations(
                 snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),
                 truncated INTEGER NOT NULL, exclusions_json TEXT NOT NULL);
@@ -61,7 +61,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<bool> {
              CREATE TABLE chart_source_axes(
                 run_id TEXT NOT NULL, source_id TEXT NOT NULL, name TEXT NOT NULL,
                 PRIMARY KEY(run_id,source_id,name));
-             INSERT INTO chart_index_meta VALUES (2,0);",
+             INSERT INTO chart_index_meta VALUES (3,0);",
         )?;
         tx.commit()?;
     }
@@ -106,7 +106,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<bool> {
 
 /// Derive sparse values and discovery coverage inside the caller's raw-snapshot transaction.
 pub(crate) fn insert(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: i64,
     run: &str,
     source: &str,

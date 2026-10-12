@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use parking_lot::Mutex;
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
+};
 use rvx_core::*;
 use serde_json::Value;
 
@@ -14,11 +16,13 @@ const MAX_QUERY_SCAN_ROWS: usize = 100_000;
 const MAX_QUERY_SCAN_BYTES: usize = 256 * 1024 * 1024;
 const MAX_QUERY_OUTPUT_POINTS: usize = 100_000;
 const PAGE_ENVELOPE_RESERVE: usize = 16 * 1024;
+const WAL_CHECKPOINT_PAGES: u32 = 65_536;
 const COLUMNS: &str = "id, run_id, source_id, ingested_at_ns, snapshot_json";
 
 /// Owns full-state persistence and atomic snapshot-derived projections.
 pub(crate) struct SnapshotStore {
     connection: Mutex<Connection>,
+    reader: Mutex<Connection>,
 }
 
 impl SnapshotStore {
@@ -27,6 +31,8 @@ impl SnapshotStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
+        // Amortize checkpoint I/O independently of each WAL/FULL durable commit.
+        connection.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
         let transaction = connection.transaction()?;
         let has_heads: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshot_heads')",
@@ -86,8 +92,12 @@ impl SnapshotStore {
         )?;
         }
         crate::artifact_index::initialize(&mut connection)?;
+        let reader = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        reader.pragma_update(None, "query_only", true)?;
+        reader.pragma_update(None, "temp_store", "MEMORY")?;
         Ok(Self {
             connection: Mutex::new(connection),
+            reader: Mutex::new(reader),
         })
     }
 
@@ -131,8 +141,60 @@ impl SnapshotStore {
     }
 
     /// Validate the entire page before committing full objects, gaps, and its cursor together.
+    #[cfg(test)]
     pub fn ingest(
         &self,
+        source: &Source,
+        descriptor: &SnapshotDescriptor,
+        page: &SnapshotHistoryResponse,
+    ) -> Result<usize> {
+        let mut connection = self.connection.lock();
+        let tx = connection.transaction()?;
+        let accepted = Self::ingest_page(&tx, source, descriptor, page)?;
+        tx.commit()?;
+        Ok(accepted)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ingest_batch(
+        &self,
+        pages: &[(&Source, &SnapshotDescriptor, &SnapshotHistoryResponse)],
+    ) -> Result<Vec<Result<usize>>> {
+        self.ingest_batch_timed(pages, &mut crate::diagnostics::WriteTiming::default())
+    }
+
+    pub(crate) fn ingest_batch_timed(
+        &self,
+        pages: &[(&Source, &SnapshotDescriptor, &SnapshotHistoryResponse)],
+        timing: &mut crate::diagnostics::WriteTiming,
+    ) -> Result<Vec<Result<usize>>> {
+        use crate::diagnostics::measure;
+        let mut connection = measure(&mut timing.lock_wait, || self.connection.lock());
+        let mut tx = connection.transaction()?;
+        let results = measure(&mut timing.execute, || -> Result<_> {
+            let mut results = Vec::with_capacity(pages.len());
+            for (source, descriptor, page) in pages {
+                let savepoint = tx.savepoint()?;
+                match Self::ingest_page(&savepoint, source, descriptor, page) {
+                    Ok(accepted) => {
+                        savepoint.commit()?;
+                        results.push(Ok(accepted));
+                    }
+                    Err(error) => {
+                        // Failed pages must not leave raw records, projections, gaps or cursors behind.
+                        savepoint.finish()?;
+                        results.push(Err(error));
+                    }
+                }
+            }
+            Ok(results)
+        })?;
+        measure(&mut timing.commit, || tx.commit())?;
+        Ok(results)
+    }
+
+    fn ingest_page(
+        tx: &Connection,
         source: &Source,
         descriptor: &SnapshotDescriptor,
         page: &SnapshotHistoryResponse,
@@ -150,11 +212,9 @@ impl SnapshotStore {
         }
         check_ids(std::slice::from_ref(&source.id), 1)?;
         check_ids(std::slice::from_ref(&source.run_id), 1)?;
-        let mut connection = self.connection.lock();
-        let tx = connection.transaction()?;
-        let committed: u64 = tx.query_row(
+        let committed: u64 = tx.prepare_cached(
             "SELECT next_sequence FROM snapshot_cursors WHERE source_id=?1 AND source_session_id=?2",
-            params![source.id, page.source_session_id], |row| row.get(0),
+        )?.query_row(params![source.id, page.source_session_id], |row| row.get(0),
         ).optional()?.unwrap_or(0);
         let expected = committed.max(page.oldest_sequence);
         if let Some(first_new) = page.snapshots.iter().find(|s| s.sequence >= committed) {
@@ -171,9 +231,9 @@ impl SnapshotStore {
         let mut accepted = 0;
         for snapshot in &page.snapshots {
             let encoded = serde_json::to_string(snapshot)?;
-            let stored: Option<(String, String)> = tx.query_row(
+            let stored: Option<(String, String)> = tx.prepare_cached(
                 "SELECT run_id, snapshot_json FROM snapshots WHERE source_id=?1 AND source_session_id=?2 AND sequence=?3",
-                params![source.id, page.source_session_id, snapshot.sequence], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?.query_row(params![source.id, page.source_session_id, snapshot.sequence], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
             if let Some((run_id, previous)) = stored {
                 if run_id != source.run_id
@@ -186,22 +246,25 @@ impl SnapshotStore {
             if snapshot.sequence < committed {
                 return invalid("snapshot sequence regresses behind its committed cursor");
             }
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO snapshots(run_id,source_id,source_session_id,sequence,observed_at_ns,ingested_at_ns,snapshot_json)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![source.run_id,source.id,page.source_session_id,snapshot.sequence,snapshot.observed_at_ns,now_ns(),encoded],
+            )?.execute(params![source.run_id,source.id,page.source_session_id,snapshot.sequence,snapshot.observed_at_ns,now_ns(),encoded],
             )?;
             let snapshot_id = tx.last_insert_rowid();
-            crate::chart_index::insert(&tx, snapshot_id, &source.run_id, &source.id, snapshot)?;
-            crate::artifact_index::insert(&tx, snapshot_id, &source.run_id, &source.id, snapshot)?;
+            crate::chart_index::insert(tx, snapshot_id, &source.run_id, &source.id, snapshot)?;
+            crate::artifact_index::insert(tx, snapshot_id, &source.run_id, &source.id, snapshot)?;
             if !rvx_core::is_tracker_event(&snapshot.state)? {
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO snapshot_heads(run_id,source_id,snapshot_id) VALUES (?1,?2,?3)
                  ON CONFLICT(run_id,source_id) DO UPDATE SET snapshot_id=excluded.snapshot_id",
-                    params![source.run_id, source.id, snapshot_id],
-                )?;
+                )?
+                .execute(params![source.run_id, source.id, snapshot_id])?;
             }
             accepted += 1;
+        }
+        if accepted == 0 {
+            return Ok(0);
         }
         if accepted > 0 && page.oldest_sequence > committed {
             tx.execute(
@@ -210,26 +273,25 @@ impl SnapshotStore {
                 params![source.id,page.source_session_id,committed,page.oldest_sequence,now_ns()],
             )?;
         }
-        tx.execute(
+        tx.prepare_cached(
             "INSERT INTO snapshot_cursors(source_id,source_session_id,next_sequence,updated_at_ns) VALUES (?1,?2,?3,?4)
              ON CONFLICT(source_id,source_session_id) DO UPDATE SET
              next_sequence=MAX(snapshot_cursors.next_sequence,excluded.next_sequence),updated_at_ns=excluded.updated_at_ns",
-            params![source.id,page.source_session_id,committed.max(page.next_sequence),now_ns()],
+        )?.execute(params![source.id,page.source_session_id,committed.max(page.next_sequence),now_ns()],
         )?;
-        tx.commit()?;
         Ok(accepted)
     }
 
     pub fn count(&self) -> Result<u64> {
         Ok(self
-            .connection
+            .reader
             .lock()
             .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))?)
     }
 
     pub fn gap_count(&self) -> Result<u64> {
         Ok(self
-            .connection
+            .reader
             .lock()
             .query_row("SELECT COUNT(*) FROM snapshot_gaps", [], |row| row.get(0))?)
     }
@@ -238,14 +300,18 @@ impl SnapshotStore {
         &self,
         request: &ArtifactLineageRequest,
     ) -> Result<ArtifactLineagePage> {
-        crate::artifact_index::lineage(&self.connection.lock(), request)
+        let reader = self.reader.lock();
+        let transaction = reader.unchecked_transaction()?;
+        crate::artifact_index::lineage(&transaction, request)
     }
 
     pub fn artifact_resolve(
         &self,
         request: &ArtifactResolveRequest,
     ) -> Result<ArtifactResolveResponse> {
-        crate::artifact_index::resolve(&self.connection.lock(), request)
+        let reader = self.reader.lock();
+        let transaction = reader.unchecked_transaction()?;
+        crate::artifact_index::resolve(&transaction, request)
     }
 
     /// Return an unprojected observation for inspection; nonpositive and unknown storage IDs are errors.
@@ -253,7 +319,7 @@ impl SnapshotStore {
         if id <= 0 {
             return invalid("snapshot ID must be positive");
         }
-        let connection = self.connection.lock();
+        let connection = self.reader.lock();
         let mut statement =
             connection.prepare(&format!("SELECT {COLUMNS} FROM snapshots WHERE id=?"))?;
         let mut rows = statement.query([id])?;
@@ -273,7 +339,9 @@ impl SnapshotStore {
         if request.run_ids.is_empty() {
             return invalid("catalog requires 1..64 run_ids");
         }
-        crate::chart_index::catalog(&self.connection.lock(), request, sources)
+        let reader = self.reader.lock();
+        let transaction = reader.unchecked_transaction()?;
+        crate::chart_index::catalog(&transaction, request, sources)
     }
 
     pub fn latest(&self, request: &SnapshotLatestRequest) -> Result<SnapshotLatestResponse> {
@@ -338,7 +406,7 @@ impl SnapshotStore {
         values: &[SqlValue],
         limit: usize,
     ) -> Result<(Vec<StoredSnapshot>, bool)> {
-        let connection = self.connection.lock();
+        let connection = self.reader.lock();
         let mut statement = connection.prepare(sql)?;
         let mut rows = statement.query(params_from_iter(values))?;
         let mut snapshots = Vec::new();
@@ -386,7 +454,8 @@ impl SnapshotStore {
             return invalid("duplicate query paths");
         }
         validate_range(request.from, request.to)?;
-        let connection = self.connection.lock();
+        let reader = self.reader.lock();
+        let connection = reader.unchecked_transaction()?;
         check()?;
         let mut filter = Filter::new();
         filter.ids("s.run_id", &request.run_ids);
@@ -564,6 +633,7 @@ impl SnapshotStore {
         drop(rows);
         drop(statement);
         drop(connection);
+        drop(reader);
         Ok(Projection { known, groups })
     }
 
@@ -636,7 +706,8 @@ impl SnapshotStore {
         if request.before_id <= 0 || request.after_id <= 0 {
             return invalid("snapshot IDs must be positive");
         }
-        let connection = self.connection.lock();
+        let reader = self.reader.lock();
+        let connection = reader.unchecked_transaction()?;
         let load = |id| -> Result<StateSnapshot> {
             let raw: String = connection
                 .query_row(
@@ -651,6 +722,7 @@ impl SnapshotStore {
         let before = load(request.before_id)?;
         let after = load(request.after_id)?;
         drop(connection);
+        drop(reader);
         let mut response = SnapshotDiffResponse {
             before_id: request.before_id,
             after_id: request.after_id,
@@ -998,6 +1070,12 @@ mod tests {
             .query_row("PRAGMA synchronous", [], |r| r.get(0))
             .unwrap();
         assert_eq!(sync, 2);
+        let checkpoint: u32 = reopened
+            .connection
+            .lock()
+            .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(checkpoint, WAL_CHECKPOINT_PAGES);
     }
 
     #[test]
@@ -1119,6 +1197,162 @@ mod tests {
         expired.dropped_before = Some(5);
         assert_eq!(store.ingest(&source, &descriptor, &expired).unwrap(), 1);
         assert_eq!(store.gap_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn empty_and_duplicate_pulls_do_not_write_snapshot_storage() {
+        let dir = crate::test_directory().unwrap();
+        let store = SnapshotStore::open(&dir.path().join("snapshots.db")).unwrap();
+        let source = source("source", "run");
+        let descriptor = descriptor(&source, "session");
+        let changes = || {
+            store
+                .connection
+                .lock()
+                .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = changes();
+        for _ in 0..10 {
+            assert_eq!(
+                store.ingest(&source, &descriptor, &page(vec![])).unwrap(),
+                0
+            );
+        }
+        assert_eq!(changes(), before);
+        let initial = page(vec![snapshot(0, json!({"n":1}))]);
+        assert_eq!(store.ingest(&source, &descriptor, &initial).unwrap(), 1);
+        let before = changes();
+        let mut empty = page(vec![]);
+        empty.next_sequence = 1;
+        for _ in 0..10 {
+            assert_eq!(store.ingest(&source, &descriptor, &empty).unwrap(), 0);
+            assert_eq!(store.ingest(&source, &descriptor, &initial).unwrap(), 0);
+        }
+        assert_eq!(changes(), before);
+        assert_eq!(store.cursor("source", "session").unwrap(), 1);
+    }
+
+    #[test]
+    fn grouped_pages_isolate_partial_failures_and_commit_valid_cursors() {
+        let dir = crate::test_directory().unwrap();
+        let path = dir.path().join("snapshots.db");
+        let store = SnapshotStore::open(&path).unwrap();
+        let sources = [source("a", "run"), source("b", "run"), source("c", "run")];
+        let descriptors: Vec<_> = sources.iter().map(|s| descriptor(s, "session")).collect();
+        store
+            .connection
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_bad BEFORE INSERT ON snapshots
+             WHEN NEW.source_id='b' AND NEW.sequence=1
+             BEGIN SELECT RAISE(ABORT, 'injected page failure'); END;",
+            )
+            .unwrap();
+        let good = page(vec![snapshot(0, json!({"n":1}))]);
+        let bad = page(vec![
+            snapshot(0, json!({"n":2})),
+            snapshot(1, json!({"n":3})),
+        ]);
+        let results = store
+            .ingest_batch(&[
+                (&sources[0], &descriptors[0], &good),
+                (&sources[1], &descriptors[1], &bad),
+                (&sources[2], &descriptors[2], &good),
+            ])
+            .unwrap();
+        assert_eq!(*results[0].as_ref().unwrap(), 1);
+        assert!(results[1]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("injected"));
+        assert_eq!(*results[2].as_ref().unwrap(), 1);
+        assert_eq!(store.count().unwrap(), 2);
+        assert_eq!(store.cursor("b", "session").unwrap(), 0);
+        let indexed: i64 = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM chart_fields WHERE source_id='b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 0);
+        drop(store);
+        let reopened = SnapshotStore::open(&path).unwrap();
+        assert_eq!(reopened.count().unwrap(), 2);
+        assert_eq!(reopened.cursor("a", "session").unwrap(), 1);
+        assert_eq!(reopened.cursor("c", "session").unwrap(), 1);
+        assert_eq!(reopened.latest(&latest("run")).unwrap().snapshots.len(), 2);
+    }
+
+    #[test]
+    fn grouped_commit_failure_rolls_back_all_pages_and_cursors() {
+        let dir = crate::test_directory().unwrap();
+        let store = SnapshotStore::open(&dir.path().join("snapshots.db")).unwrap();
+        store.connection.lock().execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE commit_parent(id TEXT PRIMARY KEY);
+             CREATE TABLE commit_child(id TEXT REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER fail_commit AFTER INSERT ON snapshots WHEN NEW.source_id='b'
+             BEGIN INSERT INTO commit_child VALUES ('missing'); END;"
+        ).unwrap();
+        let a = source("a", "run");
+        let b = source("b", "run");
+        let descriptor_a = descriptor(&a, "session");
+        let descriptor_b = descriptor(&b, "session");
+        let page = page(vec![snapshot(0, json!({"n": 1}))]);
+        assert!(store
+            .ingest_batch(&[(&a, &descriptor_a, &page), (&b, &descriptor_b, &page)])
+            .is_err());
+        assert_eq!(store.count().unwrap(), 0);
+        assert_eq!(store.cursor("a", "session").unwrap(), 0);
+        assert_eq!(store.cursor("b", "session").unwrap(), 0);
+        assert!(store.latest(&latest("run")).unwrap().snapshots.is_empty());
+    }
+
+    #[test]
+    fn wal_reader_is_consistent_and_does_not_block_ingestion() {
+        let dir = crate::test_directory().unwrap();
+        let store = SnapshotStore::open(&dir.path().join("snapshots.db")).unwrap();
+        let source = source("source", "run");
+        let descriptor = descriptor(&source, "session");
+        store
+            .ingest(
+                &source,
+                &descriptor,
+                &page(vec![snapshot(0, json!({"n":1}))]),
+            )
+            .unwrap();
+        let reader = store.reader.lock();
+        assert!(reader.execute("DELETE FROM snapshots", []).is_err());
+        let transaction = reader.unchecked_transaction().unwrap();
+        let count = || {
+            transaction
+                .query_row("SELECT COUNT(*) FROM snapshots", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(count(), 1);
+        store
+            .ingest(
+                &source,
+                &descriptor,
+                &page(vec![snapshot(1, json!({"n":2}))]),
+            )
+            .unwrap();
+        assert_eq!(count(), 1);
+        assert_eq!(store.cursor("source", "session").unwrap(), 2);
+        drop(transaction);
+        drop(reader);
+        assert_eq!(store.count().unwrap(), 2);
+        assert_eq!(
+            store.latest(&latest("run")).unwrap().snapshots[0]
+                .snapshot
+                .sequence,
+            1
+        );
     }
 
     #[test]
@@ -1349,6 +1583,109 @@ mod tests {
         assert_eq!(store.catalog(&request, &[producer]).unwrap(), catalog);
         assert!(store.get(0).is_err());
         assert!(store.get(999).is_err());
+    }
+
+    #[test]
+    fn isolated_store_checkpoints_on_orderly_close() {
+        let dir = crate::test_directory().unwrap();
+        let path = dir.path().join("snapshots.db");
+        let producer = source("source", "run");
+        let store = SnapshotStore::open(&path).unwrap();
+        store
+            .ingest(
+                &producer,
+                &descriptor(&producer, "session"),
+                &page(vec![snapshot(
+                    0,
+                    json!({"payload": "x".repeat(128 * 1024)}),
+                )]),
+            )
+            .unwrap();
+        assert!(
+            dir.path()
+                .join("snapshots.db-wal")
+                .metadata()
+                .unwrap()
+                .len()
+                > 128 * 1024
+        );
+        drop(store);
+        assert!(
+            !dir.path().join("snapshots.db-wal").exists(),
+            "an isolated store should checkpoint when its final connection closes"
+        );
+        let reopened = SnapshotStore::open(&path).unwrap();
+        assert_eq!(reopened.count().unwrap(), 1);
+        assert_eq!(reopened.cursor("source", "session").unwrap(), 1);
+    }
+
+    #[test]
+    fn rowid_index_upgrade_preserves_raw_events_heads_and_logical_projections() {
+        let dir = crate::test_directory().unwrap();
+        let path = dir.path().join("snapshots.db");
+        let producer = source("source", "run");
+        let store = SnapshotStore::open(&path).unwrap();
+        let mut observations = vec![
+            snapshot(0, json!({"metrics":{"loss":1.5},"exact":u64::MAX})),
+            snapshot(
+                1,
+                json!({"tracker":{"record_version":1,"kind":"event","step":0,"status":"running","commit":1}}),
+            ),
+            snapshot(2, json!({"metrics":{"loss":null},"exact":u64::MAX})),
+        ];
+        for (index, snapshot) in observations.iter_mut().enumerate() {
+            snapshot.axes.insert("step".into(), index as i64);
+        }
+        store
+            .ingest(
+                &producer,
+                &descriptor(&producer, "session"),
+                &page(observations),
+            )
+            .unwrap();
+        let before = store.history(&history("run")).unwrap();
+        let head = store.latest(&latest("run")).unwrap();
+        let mut request = query("run", &["/metrics/loss"]);
+        request.axis = "step".into();
+        let projection = store.query(&request).unwrap();
+        drop(store);
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "DROP TABLE chart_values;
+             DROP TABLE chart_axes;
+             CREATE TABLE chart_values(
+                snapshot_id INTEGER NOT NULL REFERENCES snapshots(id), path TEXT NOT NULL,
+                value REAL NOT NULL, PRIMARY KEY(snapshot_id,path));
+             CREATE TABLE chart_axes(
+                snapshot_id INTEGER NOT NULL REFERENCES snapshots(id), name TEXT NOT NULL,
+                value INTEGER NOT NULL, PRIMARY KEY(snapshot_id,name));
+             UPDATE chart_index_meta SET version=2;",
+        )
+        .unwrap();
+        assert!(old.prepare("SELECT rowid FROM chart_values").is_ok());
+        drop(old);
+        let upgraded = SnapshotStore::open(&path).unwrap();
+        assert_eq!(upgraded.history(&history("run")).unwrap(), before);
+        assert_eq!(upgraded.latest(&latest("run")).unwrap(), head);
+        assert_eq!(upgraded.query(&request).unwrap(), projection);
+        assert_eq!(upgraded.cursor("source", "session").unwrap(), 3);
+        assert_eq!(upgraded.gap_count().unwrap(), 0);
+        for table in ["chart_values", "chart_axes"] {
+            assert!(upgraded
+                .reader
+                .lock()
+                .prepare(&format!("SELECT rowid FROM {table}"))
+                .is_err());
+        }
+        assert_eq!(
+            upgraded
+                .reader
+                .lock()
+                .query_row("SELECT version FROM chart_index_meta", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
     }
 
     #[test]

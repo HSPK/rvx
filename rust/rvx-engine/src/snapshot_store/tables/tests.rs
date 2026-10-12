@@ -984,12 +984,12 @@ fn cancellation_is_request_local_and_does_not_poison_the_owner() {
 }
 
 #[test]
-fn cancelled_reader_waits_for_the_same_store_lock_without_interrupting_its_owner() {
+fn cancelled_reader_waits_for_the_read_connection_without_interrupting_its_owner() {
     let mut fixture = Fixture::new();
     fixture.source("a", "run");
     fixture.ingest("a", vec![(0, None, json!({"rows":[1]}))]);
     let control = TableReadControl::default();
-    let held = fixture.store.connection.lock();
+    let held = fixture.store.reader.lock();
     std::thread::scope(|scope| {
         let reader = scope.spawn(|| fixture.store.table_catalog(&fixture.sources, &control));
         control.cancel();

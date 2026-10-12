@@ -1,7 +1,5 @@
 use crate::{EngineError, Result};
-use rusqlite::{
-    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Transaction,
-};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use rvx_core::*;
 use serde_json::Value;
 
@@ -89,7 +87,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 }
 
 pub(crate) fn insert(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: i64,
     run: &str,
     source: &str,
@@ -149,7 +147,7 @@ pub(crate) fn insert(
 }
 
 fn exclude(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: i64,
     index: i64,
     run: &str,

@@ -154,6 +154,7 @@ async fn authenticated_ui_and_api_allow_remote_same_origin_without_exposing_anon
         "/assets/app.js",
         "/healthz",
         "/api/experiments/projects",
+        "/api/experiments/ingestion",
         "/api/status",
     ] {
         let response = client
@@ -182,6 +183,7 @@ async fn authenticated_ui_and_api_allow_remote_same_origin_without_exposing_anon
         "/assets/app.js",
         "/healthz",
         "/api/experiments/projects",
+        "/api/experiments/ingestion",
     ] {
         let response = client
             .get(format!("{}{path}", server.url))
@@ -332,6 +334,25 @@ async fn snapshot_pull_and_read_apis_preserve_structured_state_without_metric_wr
         .unwrap();
     assert_eq!(fixture.engine.scrape_source(&source).await.unwrap(), 2);
     assert_eq!(fixture.engine.scrape_source(&source).await.unwrap(), 0);
+    let server = Server::start(fixture.router()).await;
+    let client = client();
+    let diagnostic = client
+        .get(format!("{}/api/experiments/ingestion", server.url))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<rvx_core::IngestionDiagnostics>()
+        .await
+        .unwrap();
+    assert_eq!(diagnostic.groups, 2);
+    assert_eq!(diagnostic.pages, 2);
+    assert_eq!(diagnostic.committed_records, 2);
+    assert_eq!(diagnostic.empty_pages, 0);
+    assert_eq!(diagnostic.input_records, 4);
+    assert_eq!(diagnostic.failed_pages, 0);
+    assert_eq!(diagnostic.queue_wait.count, 2);
     assert!(!fixture.directory.path().join("data/metrics.wal").exists());
     let stats = fixture.engine.stats().unwrap();
     assert_eq!(stats.snapshots, 2);
@@ -343,8 +364,6 @@ async fn snapshot_pull_and_read_apis_preserve_structured_state_without_metric_wr
             .len(),
         8
     );
-    let server = Server::start(fixture.router()).await;
-    let client = client();
     let mut results = Vec::new();
     for (route, request) in [
         ("latest", json!({"run_id":run.id})),

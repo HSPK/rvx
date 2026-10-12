@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 mod artifacts;
 pub use artifacts::*;
+mod ingestion;
+pub use ingestion::*;
 mod tracker;
 pub use tracker::*;
 mod snapshots;
