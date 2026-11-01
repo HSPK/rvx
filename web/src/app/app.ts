@@ -12,12 +12,12 @@ import {scopedRunLabels} from "./run-context";
 import type {ExperimentRun} from "../domain/types";
 import {button, dialog, el, errorText, icon, iconButton, message} from "./ui";
 
-type NoticeKind = "preferences" | "metadata" | "authentication";
+type NoticeKind = "preferences" | "metadata" | "authentication" | "updates";
 
 /** Own one shared run selection, URL state, selector, and chart workspace. */
 export class App {
   private reads = new MetricCatalogQueryCoordinator();
-  private globalNotice = el("div", "workspace-notice preferences-notice");
+  private globalNotice = el("div", "workspace-notice preferences-notice connection-notice");
   private notices = new Map<NoticeKind, string>();
   private preferences = new PreferencesStore(message => this.showNotice(message), () => {
     if (this.themeControl) this.applyTheme(this.themeControl);
@@ -64,6 +64,7 @@ export class App {
     this.themeControl = theme;
     this.applyTheme(theme);
     const connectionHost = el("div", "connection-host");
+    connectionHost.append(this.globalNotice);
     const actions = el("div", "app-global-actions"); actions.append(theme);
     if (this.authentication) {
       this.signOutControl = iconButton("Sign out", "logout", () => {
@@ -74,7 +75,7 @@ export class App {
     }
     bar.append(brand, this.workspaceHeader, connectionHost, actions);
     this.globalNotice.setAttribute("role", "status"); this.globalNotice.hidden = !this.globalNotice.textContent;
-    this.root.replaceChildren(bar, this.globalNotice, this.main);
+    this.root.replaceChildren(bar, this.main);
     window.addEventListener("popstate", () => this.restoreUrl(), {signal: this.lifetime.signal});
     this.mobile.addEventListener("change", () => {
       if (!this.mobile.matches) this.sheet?.close();
@@ -82,9 +83,9 @@ export class App {
     }, {signal: this.lifetime.signal});
     window.addEventListener("pagehide", event => {if (!event.persisted) this.destroy();}, {signal: this.lifetime.signal});
     this.main.replaceChildren(message("Loading workspace settings", "Connecting to the server…"));
-    const ready = await this.preferences.bootstrap();
+    await this.preferences.bootstrap();
     if (this.lifetime.signal.aborted) return;
-    if (ready) this.startConnection(connectionHost);
+    this.startConnection(connectionHost);
     if (routeFrom(new URL(location.href)).kind === "missing") this.restoreUrl();
     else await this.loadMetadata();
   }
@@ -111,17 +112,24 @@ export class App {
 
   /** Show one bounded notification at a time without losing independent failure states. */
   private renderNotice(): void {
-    const kind = this.notices.has("authentication") ? "authentication" : this.notices.has("metadata") ? "metadata" : "preferences";
+    const kind = this.notices.has("authentication") ? "authentication" : this.notices.has("metadata") ? "metadata"
+      : this.notices.has("preferences") ? "preferences" : "updates";
     const text = this.notices.get(kind);
     this.globalNotice.hidden = text === undefined;
     if (text !== undefined) {
-      this.globalNotice.replaceChildren(el("span", "", text));
-      if (kind === "preferences" && this.preferences.error) this.globalNotice.append(button("Retry", () => {
+      const label = el("span", "connection-notice-label", kind === "authentication" ? "Sign-out failed"
+        : kind === "metadata" ? "Runs unavailable" : kind === "updates" ? "Updates unavailable"
+          : this.preferences.errorKind === "workspace" ? "Save failed" : this.preferences.error ? "Settings unavailable" : "Settings notice");
+      label.setAttribute("aria-hidden", "true"); this.globalNotice.title = text;
+      this.globalNotice.replaceChildren(label, el("span", "sr-only", text));
+      if (kind === "metadata" || kind === "updates" || kind === "preferences" && this.preferences.error) this.globalNotice.append(iconButton("Retry", "refresh", () => {
+        if (kind === "metadata") {void this.loadMetadata(); return;}
+        if (kind === "updates") {this.workspace?.refreshNow(); return;}
         if (this.preferences.errorKind === "workspace" && !this.preferences.pendingDeletion) {this.workspace?.retrySave(); return;}
         void this.preferences.retry().then(() => {
           if (!this.preferences.error) {this.clearNotice("preferences"); this.workspace?.reconcilePreferences(); this.startConnection();}
         });
-      }, "text-button"));
+      }));
       this.globalNotice.append(iconButton("Dismiss notification", "close", () => this.clearNotice(kind)));
     }
   }
@@ -226,7 +234,8 @@ export class App {
       }, () => {void this.loadMetadata();}, id => this.openRunDetails(id));
       this.workspace = new ChartWorkspace(this.runIds, this.metadata, this.reads, this.preferences, this.range, id => this.colors.get(id), run => this.runLabel(run),
         () => this.openRuns(), id => this.toggleRun(id), range => {this.range = {...range}; this.writeUrl(false);},
-        () => {void this.loadMetadata();}, id => this.openRunDetails(id), id => this.openRunColor(id));
+        () => {void this.loadMetadata();}, id => this.openRunDetails(id), id => this.openRunColor(id),
+        text => {if (text === null) this.clearNotice("updates"); else this.showNotice(text, "updates");});
       this.resize?.destroy();
       this.resize = new SidebarResize(this.layout, this.preferences.data.sidebar_width, sidebar_width => this.preferences.updateBrowser({sidebar_width}));
       this.dock.replaceChildren(this.selector.element, this.resize.element);

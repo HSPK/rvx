@@ -5,6 +5,7 @@ import {assertAuthenticated, AuthenticationRequired, requireAuthentication} from
 export class ConnectionStatus {
   readonly element = el("button", "connection-status");
   private announcement = el("span", "sr-only");
+  private label = el("span", "connection-label");
   private tooltip = el("span", "connection-tooltip");
   private socket: WebSocket | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -19,7 +20,8 @@ export class ConnectionStatus {
     this.announcement.setAttribute("role", "status");
     this.announcement.setAttribute("aria-live", "polite");
     this.tooltip.setAttribute("role", "tooltip"); this.tooltip.setAttribute("aria-hidden", "true");
-    this.element.append(el("i", "connection-dot"), this.announcement, this.tooltip);
+    this.label.setAttribute("aria-hidden", "true");
+    this.element.append(this.label, el("i", "connection-dot"), this.announcement, this.tooltip);
     this.update("connecting", "Connecting");
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {this.release(); this.update("offline", "Inactive while this page is hidden");}
@@ -31,6 +33,10 @@ export class ConnectionStatus {
   start(): void {this.connect();}
   private update(state: string, text: string): void {
     this.element.dataset.state = state; this.tooltip.textContent = text; this.element.setAttribute("aria-label", text);
+    const label = state === "offline" ? text === "Sign in required" ? "Sign in" : navigator.onLine ? "Disconnected" : "Offline"
+      : state === "connecting" && this.connectedBefore ? "Reconnecting" : "";
+    this.label.hidden = !label;
+    if (this.label.textContent !== label) this.label.textContent = label;
     if (state !== this.state) this.announcement.textContent = text;
     this.state = state;
   }

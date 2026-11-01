@@ -3,14 +3,18 @@ import {mockApi, seedWorkspace, uiServer} from "./fixtures";
 
 const password = "fixture-only-server-password-0123456789";
 async function authentication(page: Page, initial = false) {
-  const state = {authenticated: initial, loginCalls: 0, logoutCalls: 0, failLogout: false, cookieAccepted: true};
+  const state = {authenticated: initial, loginCalls: 0, logoutCalls: 0, sessionCalls: 0, failSession: false, failLogout: false, cookieAccepted: true};
   await page.route("**/api/**", route => {
     if (new URL(route.request().url()).pathname.startsWith("/api/auth/")) return route.fallback();
     return state.authenticated ? route.fallback() : route.fulfill({status: 401, json: {error: "Authentication required."}});
   });
   await page.route("**/api/auth/**", route => {
     const path = new URL(route.request().url()).pathname;
-    if (path.endsWith("/session")) return route.fulfill({json: {authenticated: state.authenticated, authentication_required: true}});
+    if (path.endsWith("/session")) {
+      state.sessionCalls++;
+      return state.failSession ? route.fulfill({status: 503, json: {error: "Authentication is temporarily unavailable."}})
+        : route.fulfill({json: {authenticated: state.authenticated, authentication_required: true}});
+    }
     if (path.endsWith("/login")) {
       state.loginCalls++;
       if (route.request().postDataJSON().password !== password) return route.fulfill({status: 401, json: {error: "Invalid password."}});
@@ -157,13 +161,55 @@ test("revoked sockets lock collapsed workspaces, but a cookie renewed by another
   });
   await page.goto("/rvx?runs=run-1");
   await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "connected");
+  await page.evaluate(() => {
+    document.documentElement.dataset.expiryShown = "false";
+    new MutationObserver(() => {
+      if (document.querySelector(".auth-lock .auth-title")?.textContent === "Session expired") document.documentElement.dataset.expiryShown = "true";
+    }).observe(document.body, {childList: true, subtree: true});
+  });
   sockets[0]!.close({code: 1008, reason: "session expired or revoked"});
   await expect.poll(() => sockets.length).toBe(2);
   await expect(page.getByRole("dialog", {name: "Sign in again"})).toHaveCount(0);
+  expect(await page.locator("html").getAttribute("data-expiry-shown")).toBe("false");
   auth.authenticated = false;
   sockets[1]!.close({code: 1008, reason: "session expired or revoked"});
   await expect(page.getByRole("dialog", {name: "Sign in again"})).toBeVisible();
 });
+
+for (const recovery of ["socket", "browser history"] as const) {
+  test(`temporary ${recovery} session-check failures retain the draft without requesting a password`, async ({page}) => {
+    await mockApi(page); const auth = await authentication(page, true);
+    await seedWorkspace(page, [{path: "/progress/loss", size: "normal"}]);
+    const sockets: WebSocketRoute[] = [];
+    await page.routeWebSocket("**/api/ui/connection", socket => {
+      sockets.push(socket);
+      socket.onMessage(message => socket.send(JSON.stringify({type: "pong", id: JSON.parse(String(message)).id})));
+    });
+    await page.goto("/rvx?runs=run-1");
+    const card = page.locator(".chart-card");
+    await expect(card.locator("canvas")).toBeVisible();
+    await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "connected");
+    const canvas = await card.locator("canvas").elementHandle(), url = page.url();
+    await card.locator(".menu-trigger").click(); await card.getByRole("menuitem", {name: "Make wide"}).click();
+    const before = auth.sessionCalls;
+    auth.failSession = true;
+    if (recovery === "socket") sockets[0]!.close({code: 1008, reason: "session expired or revoked"});
+    else await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", {persisted: true})));
+    const lock = page.getByRole("dialog", {name: "Sign in again", exact: true});
+    await expect(lock.getByRole("heading", {name: "Unable to verify session", exact: true})).toBeVisible();
+    await expect(lock.getByLabel("Password", {exact: true})).toHaveCount(0);
+    await expect(lock.getByText("Session expired", {exact: true})).toHaveCount(0);
+    expect(auth.sessionCalls - before).toBe(1);
+    auth.failSession = false;
+    await lock.getByRole("button", {name: "Retry", exact: true}).click();
+    await expect(lock).toHaveCount(0);
+    await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "connected");
+    await expect(card).toHaveClass(/wide/);
+    expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+    expect(page.url()).toBe(url);
+    expect(auth.loginCalls).toBe(0);
+  });
+}
 
 test("blocked cookies and unavailable bootstrap remain explicit without unsafe redirects", async ({page}) => {
   await mockApi(page); const auth = await authentication(page); auth.cookieAccepted = false;

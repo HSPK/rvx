@@ -1,9 +1,9 @@
 import type {TableFilterPreference} from "./panels";
-import {button, dialog, el, field, select} from "./ui";
+import {button, dialog, el, field, iconButton, select} from "./ui";
 
 export interface FilterColumn {id: string; label: string; filterable?: boolean}
 
-/** Edit copied reusable conditions for tables and snapshot visualizations without deleting disabled rules. */
+/** Edit copied conditions, retaining disabled rules until they are explicitly removed. */
 export function openTableFilters(columns: FilterColumn[], input: TableFilterPreference[],
   changed: (filters: TableFilterPreference[]) => void, closed?: () => void): ReturnType<typeof dialog> {
   const filters = input.map(filter => ({...filter}));
@@ -14,25 +14,44 @@ export function openTableFilters(columns: FilterColumn[], input: TableFilterPref
   const value = el("input", "text-input"); value.setAttribute("aria-label", "Filter value"); value.placeholder = "Value";
   const error = el("p", "error-text"); error.setAttribute("role", "alert");
   const publish = (): void => changed(filters.map(filter => ({...filter})));
+  const list = el("div", "table-filter-list");
   let editing: number | null = null;
-  for (const [index, filter] of filters.entries()) {
-    const row = el("div", "active-table-filter");
-    const enabled = el("input"); enabled.type = "checkbox"; enabled.checked = filter.enabled !== false;
-    enabled.setAttribute("aria-label", `Enable filter ${index + 1}`);
-    enabled.addEventListener("change", () => {
-      filter.enabled = enabled.checked; clear.disabled = filters.every(filter => filter.enabled === false); publish();
-    });
-    const operators = {contains: "contains", eq: "=", gt: ">", lt: "<"};
-    const edit = button(`${columns.find(column => column.id === filter.path)?.label ?? filter.path} ${operators[filter.op]} ${filter.value}`, () => {
-      editing = index; column.value = filter.path; operation.value = filter.op; value.value = filter.value;
-      submit.querySelector("span")!.textContent = "Update filter"; value.focus();
-    }, "filter-condition");
-    edit.setAttribute("aria-label", `Edit filter ${index + 1}`);
-    row.append(enabled, edit); modal.body.append(row);
-  }
+  const updateSubmit = (): void => {
+    submit.disabled = !column.value || !value.value.trim();
+    error.textContent = "";
+  };
+  const renderFilters = (): void => {
+    list.replaceChildren();
+    clear.hidden = !filters.length; clear.disabled = filters.every(filter => filter.enabled === false);
+    for (const [index, filter] of filters.entries()) {
+      const row = el("div", "active-table-filter");
+      const enabled = el("input"); enabled.type = "checkbox"; enabled.checked = filter.enabled !== false;
+      enabled.setAttribute("aria-label", `Enable filter ${index + 1}`);
+      enabled.addEventListener("change", () => {
+        filter.enabled = enabled.checked; clear.disabled = filters.every(filter => filter.enabled === false); publish();
+      });
+      const operators = {contains: "contains", eq: "=", gt: ">", lt: "<"};
+      const edit = button(`${columns.find(column => column.id === filter.path)?.label ?? filter.path} ${operators[filter.op]} ${filter.value}`, () => {
+        editing = index; column.value = filter.path; operation.value = filter.op; value.value = filter.value;
+        submit.querySelector("span")!.textContent = "Update filter"; updateSubmit(); value.focus();
+      }, "filter-condition");
+      edit.setAttribute("aria-label", `Edit filter ${index + 1}`);
+      const remove = iconButton(`Delete filter ${index + 1}`, "trash", () => {
+        filters.splice(index, 1);
+        if (editing === index) {
+          editing = null; value.value = ""; submit.querySelector("span")!.textContent = "Add filter";
+        } else if (editing !== null && editing > index) editing--;
+        renderFilters(); updateSubmit(); publish();
+        const next = list.querySelectorAll<HTMLButtonElement>(".icon-button")[Math.min(index, filters.length - 1)];
+        (next ?? value).focus();
+      });
+      row.append(enabled, edit, remove); list.append(row);
+    }
+  };
   const criteria = el("div", "filter-criteria"), entry = el("div", "filter-entry");
   criteria.append(field("Column", column), field("Condition", operation));
   const submit = button("Add filter", () => {
+    if (!value.value.trim()) {error.textContent = "Enter a filter value."; value.focus(); return;}
     if (editing === null && filters.length >= 32) {error.textContent = "Use at most 32 column filters."; return;}
     if (new TextEncoder().encode(value.value).length > 4096) {error.textContent = "Filter values must fit within 4096 UTF-8 bytes."; return;}
     const op = operation.value;
@@ -51,6 +70,10 @@ export function openTableFilters(columns: FilterColumn[], input: TableFilterPref
   }, "text-button");
   clear.hidden = !filters.length; clear.disabled = filters.every(filter => filter.enabled === false);
   modal.node.querySelector(".dialog-header > .icon-button")!.before(clear);
-  modal.body.append(criteria, entry, error);
+  value.addEventListener("input", updateSubmit);
+  column.addEventListener("change", updateSubmit);
+  operation.addEventListener("change", updateSubmit);
+  modal.body.append(list, criteria, entry, error);
+  renderFilters(); updateSubmit();
   return modal;
 }

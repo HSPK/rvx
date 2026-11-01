@@ -336,6 +336,7 @@ export class AddEditor {
       this.preview?.destroy(); this.preview = new ChartRenderer(spec, metrics[0]!, () => {}, this.context.colorFor, this.context.labelFor, () => {void this.loadPreview();}, "preview");
       this.previewHost.replaceChildren(this.preview.element);
     } else {this.preview.setScope([]); this.preview.applySpec(spec);}
+    this.preview.setTimeFormat(this.context.range.timeFormat);
     this.preview.updateCombined(metrics, [], this.context.runs, this.context.range.axis, true);
     const available = metrics.filter(metric => metric.sources.length);
     if (!available.length) {this.preview.unavailable(this.context.runs, this.context.catalog.truncated); return;}

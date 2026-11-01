@@ -33,6 +33,39 @@ test("panel menus, reset zoom, workspace saves and deletion remain directly oper
   await expect(page.getByRole("button", {name: "Add", exact: true})).toBeFocused();
 });
 
+test("pointer actions survive transient focus changes and open persistent edit/fullscreen dialogs", async ({page}) => {
+  await mockApi(page);
+  await seedWorkspace(page, [{path: "/progress/loss", size: "normal"}]);
+  await page.goto("/rvx?runs=run-1");
+  const card = page.locator(".chart-card"), trigger = card.locator(".menu-trigger");
+  await expect(card.locator("canvas")).toBeVisible();
+  const canvas = await card.locator("canvas").elementHandle();
+  await trigger.click();
+  const fullscreen = card.getByRole("menuitem", {name: "Fullscreen", exact: true});
+  await fullscreen.evaluate(node => node.addEventListener("pointerdown", () => {
+    document.querySelector<HTMLElement>(".chart-scroll")!.focus({preventScroll: true});
+  }, {once: true}));
+  const target = (await fullscreen.boundingBox())!;
+  await page.mouse.click(target.x + target.width / 2, target.y + target.height / 2);
+  await expect(page.locator(".panel-fullscreen[open]")).toBeVisible();
+  expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+  await page.keyboard.press("Escape");
+  await trigger.click();
+  const edit = (await card.getByRole("menuitem", {name: "Edit chart", exact: true}).boundingBox())!;
+  await page.mouse.click(edit.x + edit.width / 2, edit.y + edit.height / 2);
+  await expect(page.getByRole("dialog", {name: "Edit panel", exact: true})).toBeVisible();
+  await page.keyboard.press("Escape");
+  await trigger.click();
+  await card.getByRole("menuitem", {name: "Make wide", exact: true}).click();
+  await expect(card).toHaveClass(/wide/);
+  await trigger.click();
+  await page.keyboard.press("Tab");
+  await expect(card.getByRole("menu")).toHaveCount(0);
+  await trigger.click();
+  await card.getByRole("menuitem", {name: "Remove chart", exact: true}).click();
+  await expect(card).toHaveCount(0);
+});
+
 test("retry preserves last successful data and metadata filters never change Run selection", async ({page}) => {
   const options: FixtureOptions = {};
   await mockApi(page, options);

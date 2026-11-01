@@ -87,16 +87,15 @@ export class PanelChrome {
       window.addEventListener("resize", () => this.position(), {signal: this.tracking.signal});
       window.addEventListener("scroll", () => this.position(), {capture: true, signal: this.tracking.signal});
     }, {signal});
+    // Native light-dismiss owns pointer closing; focusout can occur before an item's click.
     this.menu.addEventListener("keydown", event => {
       if (event.key === "Escape") {event.preventDefault(); event.stopPropagation(); this.menu.hidePopover(); this.trigger.focus(); return;}
+      if (event.key === "Tab") {this.menu.hidePopover(); this.trigger.focus({preventScroll: true}); return;}
       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
       const items = [...this.menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled):not([hidden])")];
       const index = items.findIndex(item => item === document.activeElement);
       const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
       event.preventDefault(); items[next]?.focus();
-    }, {signal});
-    this.menu.addEventListener("focusout", event => {
-      if (this.menu.matches(":popover-open") && event.relatedTarget instanceof Node && !this.menu.contains(event.relatedTarget) && event.relatedTarget !== this.trigger) this.menu.hidePopover();
     }, {signal});
   }
   /** Flip above near the viewport edge and stop following anchors that leave their scroll region. */

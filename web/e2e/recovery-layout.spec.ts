@@ -57,6 +57,34 @@ test("metadata recovery clears only its own notification and preserves preferenc
   await expect(notice).toBeHidden();
 });
 
+test("lost updates use compact status chrome without moving the layout or discarding the last frame", async ({page}) => {
+  const options: FixtureOptions = {failCatalog: false};
+  await mockApi(page, options);
+  await page.goto("/rvx?runs=run-1");
+  const chart = page.locator(".chart-card").first();
+  await expect(chart.locator("canvas")).toBeVisible();
+  const canvas = await chart.locator("canvas").elementHandle();
+  const before = (await page.locator(".chart-scroll").boundingBox())!.y;
+  options.failCatalog = true;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  const notice = page.locator(".connection-host .connection-notice");
+  await expect(notice.locator(".connection-notice-label")).toHaveText("Updates unavailable");
+  await expect(notice).toHaveAttribute("title", /Catalog temporarily unavailable/);
+  const message = (await notice.boundingBox())!, dot = (await page.locator(".connection-dot").boundingBox())!;
+  expect(message.x + message.width).toBeLessThanOrEqual(dot.x);
+  expect((await page.locator(".chart-scroll").boundingBox())!.y).toBe(before);
+  await expect(page.locator(".workspace-page .workspace-notice")).toBeHidden();
+  expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+  for (const width of [390, 320, 1440]) {
+    await page.setViewportSize({width, height: 900});
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  options.failCatalog = false;
+  await notice.getByRole("button", {name: "Retry", exact: true}).click();
+  await expect(notice).toBeHidden();
+  expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+});
+
 test("run sheets fit empty, short and large lists without moving the search field", async ({page}) => {
   await mockApi(page, {runCount: 10_000});
   let count = 0;

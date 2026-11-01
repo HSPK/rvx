@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use rvx_core::{new_id, now_ns, Experiment, Project, Run, RunStatus, Source, SourceState};
 
 use crate::{EngineError, Result};
@@ -13,6 +13,7 @@ mod ui;
 
 pub struct Repository {
     connection: Mutex<Connection>,
+    auth_reader: Mutex<Connection>,
 }
 
 pub(crate) struct ScopedSource {
@@ -74,8 +75,11 @@ impl Repository {
         )?;
         ui::initialize(&connection)?;
         auth::initialize(&connection)?;
+        let auth_reader = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        auth_reader.pragma_update(None, "query_only", true)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            auth_reader: Mutex::new(auth_reader),
         })
     }
 

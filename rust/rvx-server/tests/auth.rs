@@ -812,6 +812,93 @@ async fn auth_cookie_websockets_recheck_logout_expiry_and_shutdown_even_with_cac
 }
 
 #[tokio::test]
+async fn auth_cookie_websocket_storage_failure_is_retryable_without_revoking_the_session() {
+    let fixture = Fixture::new();
+    let server = Server::authenticated(&fixture).await;
+    let client = client();
+    let login = cookie(&server.login(&client, TOKEN, "").await);
+    let mut socket = server.socket(&login, false).await;
+    fixture
+        .database()
+        .execute(
+            "ALTER TABLE auth_sessions RENAME TO unavailable_sessions",
+            [],
+        )
+        .unwrap();
+    socket
+        .send(Message::Text(
+            r#"{"type":"ping","id":"storage-unavailable"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_closed(next(&mut socket).await, 1013);
+    assert_eq!(
+        client
+            .get(format!("{}/api/auth/session", server.url))
+            .header("cookie", &login)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    fixture
+        .database()
+        .execute(
+            "ALTER TABLE unavailable_sessions RENAME TO auth_sessions",
+            [],
+        )
+        .unwrap();
+    assert_eq!(server.status(&client, &login).await["authenticated"], true);
+    let mut socket = server.socket(&login, false).await;
+    socket
+        .send(Message::Text(r#"{"type":"ping","id":"recovered"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(next(&mut socket).await.to_text().unwrap()).unwrap(),
+        json!({"type":"pong","id":"recovered"})
+    );
+    server.close().await;
+}
+
+#[test]
+fn auth_cookie_websocket_verification_timeout_does_not_expire_the_cookie() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let fixture = Fixture::new();
+        let server = Server::authenticated(&fixture).await;
+        let client = client();
+        let login = cookie(&server.login(&client, TOKEN, "").await);
+        let mut socket = server.socket(&login, false).await;
+        let (release, waiting) = std::sync::mpsc::channel();
+        let (started, ready) = oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = waiting.recv();
+        });
+        ready.await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"type":"ping","id":"verification-delayed"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let message = next(&mut socket).await;
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        assert_closed(message, 1013);
+        assert_eq!(server.status(&client, &login).await["authenticated"], true);
+        server.close().await;
+    });
+}
+
+#[tokio::test]
 async fn auth_bearer_websockets_never_query_cookie_session_storage() {
     let fixture = Fixture::new();
     let server = Server::authenticated(&fixture).await;

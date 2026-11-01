@@ -49,13 +49,6 @@ export class SignInForm {
 
   /** Focus credentials only after the form is attached or its modal is shown. */
   focus(): void {this.password.focus();}
-  /** Surface a failed background session check without replacing an active credential submission. */
-  sessionCheckFailed(): void {
-    if (this.busy) return;
-    this.error.textContent = "Unable to verify your session. Try signing in again.";
-    this.error.hidden = false;
-  }
-
   /** Send at most one password request and retain an actionable failure instead of a browser challenge. */
   private async authenticate(): Promise<void> {
     if (this.busy || this.retryTimer || !this.form.reportValidity()) return;

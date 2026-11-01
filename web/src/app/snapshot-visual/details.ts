@@ -3,6 +3,7 @@ import type {MetricCatalogQueryCoordinator} from "../coordinator";
 import {decimalDisplay} from "../decimal-display";
 import {formatTime, observedTime} from "../model";
 import {missingCell} from "../table-view";
+import {temporalCellText} from "../time";
 import {dialog, el, errorText} from "../ui";
 import {uiIdentifier} from "../../core/identifiers";
 
@@ -19,6 +20,10 @@ export function cellText(cell: TableCell = missingCell, decimals?: number): stri
     : cell.kind === "number" && !cell.truncated ? decimalDisplay(cell.text, decimals)
     : cell.kind === "string" && !cell.text ? '""' : cell.text;
   return `${text}${cell.truncated ? " [preview]" : ""}`;
+}
+
+export function fieldCellText(path: string, cell: TableCell | undefined): string {
+  return temporalCellText(path, cell) ?? cellText(cell);
 }
 
 /** Separate geometry coercion from exact labels, including numbers outside finite browser range. */
@@ -129,8 +134,8 @@ export class TaskDetails {
   private paint(target: HTMLElement, cells: Record<string, TableCell>): void {
     const fragment = document.createDocumentFragment();
     for (const [path, cell] of Object.entries(cells).slice(0, 131)) {
-      const value = el("dd", "sv-task-value", cellText(cell));
-      value.dataset.kind = cell.kind; value.title = `${cell.kind}${cell.truncated ? " · truncated preview" : ""}`;
+      const value = el("dd", "sv-task-value", fieldCellText(path, cell));
+      value.dataset.kind = cell.kind; value.title = `${cell.kind}${cell.truncated ? " · truncated preview" : ""}: ${cell.text}`;
       const label = el("dt", "", this.names.fieldName(path)); label.title = path;
       fragment.append(label, value);
     }

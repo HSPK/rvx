@@ -169,6 +169,71 @@ test("filters can be disabled, re-enabled and edited without losing their saved 
   await expect(card.locator("tbody tr")).toHaveCount(4);
 });
 
+test("later native filter options stay inside the filter interaction rather than dismissing the dialog", async ({page}) => {
+  await mockApi(page); await seed(page, [table]);
+  await page.goto("/rvx?runs=run-1");
+  const card = page.locator(".table-card");
+  await expect(card.locator("tbody tr")).toHaveCount(75);
+  await card.getByRole("button", {name: "Filter", exact: true}).click();
+  const modal = page.getByRole("dialog", {name: "Filter rows", exact: true});
+  const column = modal.getByRole("combobox", {name: "Filter column", exact: true});
+  for (const viewport of [{width: 1440, height: 900}, {width: 844, height: 390}, {width: 390, height: 844}]) {
+    await page.setViewportSize(viewport);
+    for (const path of ["/counter", "/healthy", "/nullable", "/nested"]) {
+      await column.click();
+      await column.locator(`option[value="${path}"]`).click();
+      await expect(modal).toBeVisible();
+      await expect(column).toHaveValue(path);
+    }
+  }
+});
+
+test("a filter interaction ending on the backdrop does not count as an outside click", async ({page}) => {
+  await mockApi(page); await seed(page, [table]);
+  await page.goto("/rvx?runs=run-1");
+  const card = page.locator(".table-card");
+  await expect(card.locator("tbody tr")).toHaveCount(75);
+  await card.getByRole("button", {name: "Filter", exact: true}).click();
+  const modal = page.getByRole("dialog", {name: "Filter rows", exact: true});
+  const value = (await modal.getByRole("textbox", {name: "Filter value"}).boundingBox())!;
+  const box = (await modal.boundingBox())!;
+  await page.mouse.move(value.x + 10, value.y + value.height / 2); await page.mouse.down();
+  await page.mouse.move(box.x - 10, box.y - 10); await page.mouse.up();
+  await expect(modal).toBeVisible();
+  await page.mouse.click(box.x - 10, box.y - 10);
+  await expect(modal).toHaveCount(0);
+});
+
+test("blank filters cannot be added or saved over existing conditions, and individual filters can be deleted", async ({page}) => {
+  const requests = await mockApi(page, {tableRows: 100});
+  await seed(page, [{...table, query: {filters: [{path: "/load", op: "gt", value: "90"}, {path: "/name", op: "contains", value: "worker"}]}}]);
+  await page.goto("/rvx?runs=run-1");
+  const card = page.locator(".table-card");
+  await expect(card.locator("tbody tr")).toHaveCount(9);
+  await card.getByRole("button", {name: "Filter (2)", exact: true}).click();
+  const modal = page.getByRole("dialog", {name: "Filter rows", exact: true});
+  const value = modal.getByRole("textbox", {name: "Filter value", exact: true});
+  await expect(modal.getByRole("button", {name: "Add filter", exact: true})).toBeDisabled();
+  await value.fill("   ");
+  await expect(modal.getByRole("button", {name: "Add filter", exact: true})).toBeDisabled();
+  await modal.getByRole("button", {name: "Edit filter 1", exact: true}).click();
+  await value.fill("");
+  await expect(modal.getByRole("button", {name: "Update filter", exact: true})).toBeDisabled();
+  await modal.getByRole("button", {name: "Delete filter 1", exact: true}).click();
+  await expect(modal).toBeVisible();
+  await expect(modal.getByRole("button", {name: "Add filter", exact: true})).toBeDisabled();
+  await expect(card.locator("tbody tr")).toHaveCount(75);
+  await expect(modal.getByRole("button", {name: "Edit filter 1", exact: true})).toContainText("worker");
+  await modal.getByRole("button", {name: "Delete filter 1", exact: true}).click();
+  await expect(modal.locator(".active-table-filter")).toHaveCount(0);
+  expect(requests.filter(request => request.path === "/api/tables/rows").at(-1)?.body?.filters).toEqual([]);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", {name: "Save current workspace", exact: true}).click();
+  await expect(page.locator(".workspace-save-slot")).toHaveText("Saved");
+  const stored = (await serverState(page)).workspaces.sets[0]!.panels[0]!;
+  expect(stored.kind !== "chart" && stored.query?.filters).toEqual([]);
+});
+
 test("responsive toolbars group actions and keep touch details accessible without redundant copy", async ({page}) => {
   await mockApi(page, {tableRows: 2}); await seed(page, [chart, table]);
   await page.goto("/rvx?runs=run-1,run-2");

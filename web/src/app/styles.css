@@ -84,12 +84,17 @@ svg {width: 18px; height: 18px; flex: none;}
 .workspace-save-slot[data-expired="true"] {opacity: 0; visibility: hidden; transition: opacity 160ms ease, visibility 0s linear 160ms;}
 .workspace-save-slot > .workspace-save-status {display: inline-flex; align-items: center; height: 30px; padding-inline: 6px; line-height: 20px;}
 @media (prefers-reduced-motion: reduce) {.workspace-save-slot, .workspace-save-slot[data-expired="true"] {transition: none;}}
-.connection-host {display: flex; flex: none; margin-right: -10px;}
-.connection-status {position: relative; display: flex; align-items: center; justify-content: center; width: 30px; height: 32px; padding: 0; border: 0; border-radius: 5px; background: transparent;}
+.connection-host {display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; max-width: min(260px, 40vw); margin-right: -10px;}
+.connection-status {position: relative; display: flex; align-items: center; justify-content: center; gap: 6px; flex: none; min-width: 30px; height: 32px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent;}
+.connection-label {max-width: min(100px, 22vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted);}
+.connection-host:has(.connection-notice:not([hidden])) .connection-label {display: none;}
+.connection-host > .connection-notice {display: flex; align-items: center; gap: 2px; min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; font-size: 11px; color: var(--warning);}
+.connection-notice-label {min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+.connection-notice > .icon-button {flex: none; width: 22px; min-width: 22px; height: 26px; padding: 4px; color: var(--muted);}
 .connection-tooltip {display: none; position: absolute; top: calc(100% + 7px); right: 0; z-index: 100; width: max-content; max-width: calc(100vw - 24px); padding: 7px 9px; border-radius: 5px; background: var(--surface); box-shadow: var(--shadow), 0 0 0 1px var(--line); font-size: 12px; font-weight: 400; line-height: 18px; pointer-events: none;}
 .connection-status:hover .connection-tooltip, .connection-status:focus-visible .connection-tooltip {display: block;}
 .connection-status:hover, .connection-status:focus-visible {background: var(--hover);}
-.connection-dot {width: 8px; height: 8px; border-radius: 50%; background: var(--muted);}
+.connection-dot {flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted);}
 .connection-status[data-state="connected"] .connection-dot {background: var(--positive);}
 .connection-status[data-state="connecting"] .connection-dot {background: var(--warning);}
 .appbar > .icon-button {flex: none;}
@@ -432,7 +437,13 @@ svg {width: 18px; height: 18px; flex: none;}
 .table-tools .table-search {height: 34px; min-width: 100px; width: min(210px, 35%); font-size: 12px;}
 .table-tools .button {font-size: 12px; padding: 6px 8px; min-height: 34px;}
 .table-tools > .icon-button {width: 34px; min-width: 34px; height: 34px; padding: 8px;}
-.table-scroll {overflow: auto; min-height: 0; flex: 1 1 auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); scrollbar-gutter: stable; overscroll-behavior: contain;}
+.table-scroll {overflow: auto; min-height: 0; flex: 1 1 auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); scrollbar-gutter: stable; overscroll-behavior: auto; overflow-anchor: none;}
+@supports selector(::-webkit-scrollbar) {
+  .table-scroll {scrollbar-width: auto; scrollbar-color: auto;}
+  .table-scroll::-webkit-scrollbar {width: 6px; height: 0;}
+  .table-scroll::-webkit-scrollbar-thumb {background: #9ca5b480; border-radius: 3px;}
+  .table-scroll::-webkit-scrollbar-thumb:hover {background: var(--muted);}
+}
 .table-scroll table {border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 12px; min-width: 100%;}
 .table-scroll th {position: sticky; top: 0; background: var(--surface); z-index: 2; text-align: left; height: 36px; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line);}
 .table-scroll td {height: 36px; padding: 6px 10px; border-bottom: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
@@ -458,6 +469,7 @@ svg {width: 18px; height: 18px; flex: none;}
 .active-table-filter {display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px;}
 .active-table-filter > span {flex: 1; overflow-wrap: anywhere;}
 .active-table-filter > input {width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none;}
+.active-table-filter > .icon-button {width: 30px; min-width: 30px; height: 30px; padding: 6px;}
 .filter-condition {flex: 1; min-width: 0; text-align: left; border: 0; background: transparent; padding: 6px; border-radius: 4px; overflow-wrap: anywhere;}
 .filter-condition:hover {background: var(--hover);}
 .active-table-filter:has(input:not(:checked)) .filter-condition {color: var(--muted);}

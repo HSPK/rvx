@@ -49,8 +49,6 @@ window.addEventListener("pagehide", event => {
 window.addEventListener("pageshow", event => {
   if (!event.persisted) return;
   if (!application) {void start(); return;}
-  void getSession(lifetime.signal).then(status => {
-    if (status.authenticated) gate?.restore(status); else requireAuthentication();
-  }, () => {if (!lifetime.signal.aborted) requireAuthentication();});
+  requireAuthentication();
 });
 await start();

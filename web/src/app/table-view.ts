@@ -2,6 +2,7 @@ import type {TableCell, TableDefinition} from "../domain/tables";
 import type {ColumnPreference, TableFilterPreference, TableQueryPreference} from "./panels";
 import {button, dialog, el, field, iconButton, select} from "./ui";
 import {decimalDisplay} from "./decimal-display";
+import {temporalCellText} from "./time";
 import {openTableFilters} from "./table-filters";
 
 export interface ViewColumn {id: string; label: string; numeric?: boolean; sortable?: boolean; filterable?: boolean; width?: number}
@@ -95,6 +96,8 @@ export class TableView {
   private lifetime = new AbortController();
   private headerSignature = "";
   private resizing = false;
+  private scrolling = false;
+  private scrollTimer: ReturnType<typeof setTimeout> | null = null;
   private deferred = false;
   readonly state: TableViewState = {search: "", filters: [], offset: 0, limit: tablePageSize};
 
@@ -120,6 +123,16 @@ export class TableView {
     document.addEventListener("selectionchange", () => {
       if (this.deferred && !this.hasSelectedText() && !this.resizing) {this.deferred = false; this.render();}
     }, {signal: this.lifetime.signal});
+    document.addEventListener("scroll", event => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !(target === this.viewport || target.contains(this.element))) return;
+      this.scrolling = true;
+      if (this.scrollTimer) clearTimeout(this.scrollTimer);
+      this.scrollTimer = setTimeout(() => {
+        this.scrollTimer = null; this.scrolling = false;
+        if (this.deferred) this.render();
+      }, 140);
+    }, {capture: true, passive: true, signal: this.lifetime.signal});
   }
   /** Refresh bounded rows while retaining search, widths, scroll and pinned header semantics. */
   setData(columns: ViewColumn[], rows: ViewRow[], total: number, preferences: ColumnPreference[] = []): void {
@@ -147,9 +160,8 @@ export class TableView {
   }
   /** Render native rows and headers, with exact-cell kind and immutable evidence on each row. */
   private render(): void {
-    if (this.resizing || this.hasSelectedText()) {this.deferred = true; return;}
+    if (this.resizing || this.scrolling || this.hasSelectedText()) {this.deferred = true; return;}
     this.deferred = false;
-    const left = this.viewport.scrollLeft, top = this.viewport.scrollTop;
     const signature = JSON.stringify([this.displayed, this.preferences, this.state.sort]);
     if (signature !== this.headerSignature) {
     this.headerSignature = signature;
@@ -196,19 +208,24 @@ export class TableView {
     }
     const existing = new Map([...this.body.rows].map(row => [row.dataset.rowKey, row]));
     const nextRows = this.rows.map(row => {
-      const tr = existing.get(row.key) ?? el("tr"); tr.dataset.snapshotId = row.snapshotId ?? ""; tr.dataset.rowKey = row.key;
-      tr.setAttribute("aria-label", row.title);
+      const tr = existing.get(row.key) ?? el("tr");
+      if (tr.dataset.snapshotId !== (row.snapshotId ?? "")) tr.dataset.snapshotId = row.snapshotId ?? "";
+      if (tr.dataset.rowKey !== row.key) tr.dataset.rowKey = row.key;
+      if (tr.getAttribute("aria-label") !== row.title) tr.setAttribute("aria-label", row.title);
       const cells = new Map([...tr.cells].map(cell => [cell.dataset.column, cell]));
       const nextCells: HTMLTableCellElement[] = [];
       for (const [index, column] of this.displayed.entries()) {
         const value = row.cells[column.id] ?? missingCell;
         const td = cells.get(column.id) ?? el("td");
-        td.className = `${index === 0 ? "pinned " : ""}${value.kind === "number" ? "numeric " : ""}${value.kind === "missing" || value.kind === "null" ? "muted" : ""}`;
-        td.dataset.column = column.id;
-        td.dataset.kind = value.kind; td.title = row.cellTitles?.[column.id] ?? `${value.kind}${value.truncated ? " · truncated preview" : ""}: ${value.text}`;
+        const className = `${index === 0 ? "pinned " : ""}${value.kind === "number" ? "numeric " : ""}${value.kind === "missing" || value.kind === "null" ? "muted" : ""}`;
+        if (td.className !== className) td.className = className;
+        if (td.dataset.column !== column.id) td.dataset.column = column.id;
+        if (td.dataset.kind !== value.kind) td.dataset.kind = value.kind;
+        const title = row.cellTitles?.[column.id] ?? `${value.kind}${value.truncated ? " · truncated preview" : ""}: ${value.text}`;
+        if (td.title !== title) td.title = title;
         const text = value.kind === "missing" ? "missing" : value.kind === "string" && !value.text ? '""' : value.text;
-        const display = value.kind === "number" && !value.truncated
-          ? decimalDisplay(text, this.preferences.find(preference => preference.id === column.id)?.decimals) : text;
+        const display = temporalCellText(column.id, value) ?? (value.kind === "number" && !value.truncated
+          ? decimalDisplay(text, this.preferences.find(preference => preference.id === column.id)?.decimals) : text);
         const content = `${display}${value.truncated ? " …" : ""}`;
         if (td.textContent !== content) td.textContent = content;
         nextCells.push(td);
@@ -216,12 +233,19 @@ export class TableView {
       if (nextCells.length !== tr.cells.length || nextCells.some((td, index) => tr.cells[index] !== td)) tr.replaceChildren(...nextCells);
       return tr;
     });
-    if (nextRows.length !== this.body.rows.length || nextRows.some((row, index) => this.body.rows[index] !== row)) this.body.replaceChildren(...nextRows);
+    const retained = new Set(nextRows);
+    for (const row of [...this.body.rows]) if (!retained.has(row)) row.remove();
+    for (const [index, row] of nextRows.entries()) {
+      const at = this.body.rows[index];
+      if (at !== row) this.body.insertBefore(row, at ?? null);
+    }
     if (!this.rows.length) {const tr = el("tr"), cell = el("td", "table-empty", "No matching rows"); cell.colSpan = this.displayed.length; tr.append(cell); this.body.append(tr);}
-    this.count.textContent = this.total ? `${this.state.offset + 1}–${Math.min(this.total, this.state.offset + this.rows.length)} of ${this.total.toLocaleString()}` : "0 rows";
+    const count = this.total ? `${this.state.offset + 1}–${Math.min(this.total, this.state.offset + this.rows.length)} of ${this.total.toLocaleString()}` : "0 rows";
+    if (this.count.textContent !== count) this.count.textContent = count;
     const enabled = this.state.filters.filter(filter => filter.enabled !== false).length;
-    this.filtersButton.querySelector("span")!.textContent = enabled ? `Filter (${enabled})` : "Filter";
-    this.setBusy(false); this.viewport.scrollLeft = left; this.viewport.scrollTop = top;
+    const filterLabel = this.filtersButton.querySelector("span")!, filterText = enabled ? `Filter (${enabled})` : "Filter";
+    if (filterLabel.textContent !== filterText) filterLabel.textContent = filterText;
+    this.setBusy(false);
   }
   private hasSelectedText(): boolean {
     const selection = document.getSelection();
@@ -293,5 +317,5 @@ export class TableView {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   /** Cancel local timers and column/filter dialogs when the table is removed. */
-  destroy(): void {this.lifetime.abort(); if (this.debounce) clearTimeout(this.debounce); this.modal?.close();}
+  destroy(): void {this.lifetime.abort(); if (this.debounce) clearTimeout(this.debounce); if (this.scrollTimer) clearTimeout(this.scrollTimer); this.modal?.close();}
 }

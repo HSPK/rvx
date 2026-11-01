@@ -1,6 +1,6 @@
 import {describe, expect, it, vi, afterEach} from "vitest";
 import {alignedData, cursorCoordinates, nearestIndex} from "./chart";
-import {axisLabel, defaultCharts, filteredRuns, filtersFrom, initialRange, metricName, partitionCatalogPaths, pointId, rangeBounds, reporters, routeFrom, RunColors, runColor, workspaceUrl} from "./model";
+import {axisLabel, defaultCharts, filteredRuns, filtersFrom, initialRange, metricName, partitionCatalogPaths, pointId, rangeBounds, reporters, routeFrom, RunColors, runColor, sameQueryRange, workspaceUrl} from "./model";
 import {matchingMetrics, metricEntries} from "./metric-catalog";
 import {parseExactJson} from "../core/exact-json";
 import type {ChartCatalog, ChartMetric, SnapshotQuerySeries} from "../domain/snapshots";
@@ -65,6 +65,20 @@ describe("charts-first data and navigation", () => {
     expect(rangeBounds({axis: "step", window: "3600"}, catalog)).toEqual({});
     expect(rangeBounds({axis: "step", window: "custom", from: 10, to: 20}, catalog)).toEqual({from: 10, to: 20});
     expect(initialRange(new URL("https://rvx/rvx?axis=step&range=3600")).window).toBe("all");
+  });
+  it("round-trips time/date display without changing the query scope or default URLs", () => {
+    vi.stubGlobal("location", {origin: "https://rvx"});
+    const range = {axis: "wall_time", window: "custom", from: 10, to: 20};
+    for (const timeFormat of ["time", "date"] as const) {
+      const formatted = {...range, timeFormat};
+      expect(initialRange(new URL(workspaceUrl(["r"], formatted), "https://rvx"))).toEqual(formatted);
+      expect(sameQueryRange(range, formatted)).toBe(true);
+      expect(rangeBounds(formatted, catalog)).toEqual({from: 10, to: 20});
+    }
+    expect(workspaceUrl(["r"], {...range, timeFormat: "auto"})).not.toContain("time_format");
+    expect(initialRange(new URL("https://rvx/rvx?axis=wall_time&time_format=invalid"))).toEqual({axis: "wall_time", window: "all"});
+    expect(sameQueryRange(range, {...range, axis: "elapsed"})).toBe(false);
+    expect(sameQueryRange(range, {...range, to: 30})).toBe(false);
   });
   it("accepts one workspace route and distinguishes absent, empty, and unavailable selection identities", () => {
     expect(routeFrom(new URL("https://rvx/rvx"))).toEqual({kind: "workspace", runIds: null});

@@ -28,6 +28,16 @@ async function recordCanvasText(page: Page): Promise<void> {
   });
 }
 
+async function paintedXAxis(root: Locator): Promise<string[]> {
+  return root.evaluate(element => {
+    const canvas = element.querySelector<HTMLCanvasElement>("canvas")!, overlay = element.querySelector<HTMLElement>(".u-over")!;
+    const outer = canvas.getBoundingClientRect(), inner = overlay.getBoundingClientRect();
+    const scaleX = canvas.width / outer.width, scaleY = canvas.height / outer.height;
+    const left = (inner.left - outer.left) * scaleX, bottom = (inner.bottom - outer.top) * scaleY;
+    return window.readChartPaintText(canvas).filter(item => item.y > bottom + 2 && item.x >= left - 2).map(item => item.text);
+  });
+}
+
 async function renderedPlot(root: Locator) {
   return root.evaluate(element => {
     const canvas = element.querySelector<HTMLCanvasElement>("canvas");
@@ -227,4 +237,103 @@ test("invalid Y bounds cannot commit, and Cancel preserves nested saved settings
   await chart.locator(".chart-host").focus(); await page.keyboard.press("ArrowRight");
   await expect(selectedObservation(chart)).toHaveAttribute("data-snapshot-id", id!);
   expect((await serverState(page)).workspaces).toEqual(stored);
+});
+
+test.describe("wall-time axis display", () => {
+  test.use({timezoneId: "UTC"});
+
+  test("Time and Date repaint actual ticks without reads or zoom resets and survive URL history/reload", async ({page}) => {
+    await page.clock.install({time: new Date("2026-10-17T12:00:00Z")});
+    await recordCanvasText(page);
+    await seedWorkspace(page, [{path: "/progress/loss", size: "wide"}]);
+    const requests = await mockApi(page);
+    await page.goto("/rvx?runs=run-1&axis=wall_time&range=3600");
+    const chart = page.locator(".chart-grid .chart-card");
+    await expect(chart.locator("canvas")).toBeVisible();
+    await page.clock.pauseAt(new Date("2026-10-17T12:00:02Z"));
+    const canvas = await chart.locator("canvas").elementHandle();
+    const box = (await chart.locator(".u-over").boundingBox())!;
+    await page.mouse.move(box.x + 30, box.y + 30); await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 30, box.y + 30, {steps: 4}); await page.mouse.up();
+    await page.clock.runFor(50);
+    const zoom = await chart.locator(".chart-host").getAttribute("aria-description");
+    const readCount = requests.filter(request => request.path === "/api/snapshots/query").length;
+    const range = page.getByRole("combobox", {name: "Time range", exact: true});
+    const choose = async (format: string): Promise<void> => {
+      await range.selectOption("custom");
+      const settings = page.getByRole("dialog", {name: "Time settings", exact: true});
+      await settings.getByRole("combobox", {name: "X-axis labels", exact: true}).selectOption(format);
+      await settings.getByRole("button", {name: "Apply time settings"}).click();
+      await page.clock.runFor(80);
+    };
+    await choose("time");
+    await expect.poll(() => paintedXAxis(chart)).not.toEqual([]);
+    expect((await paintedXAxis(chart)).every(label => /^\d{2}:\d{2}:\d{2}(?:\.\d{3})?$/.test(label))).toBe(true);
+    expect(new URL(page.url()).searchParams.get("time_format")).toBe("time");
+    await choose("date");
+    const dates = await paintedXAxis(chart);
+    expect(dates.length).toBeGreaterThan(0);
+    expect(dates.every(label => /^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
+    expect(new Set(dates).size).toBe(dates.length);
+    await expect(range).toHaveValue("3600");
+    await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
+    expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+    expect(requests.filter(request => request.path === "/api/snapshots/query")).toHaveLength(readCount);
+    await expect(page.locator(".workspace-save.save-needed")).toHaveCount(0);
+    await page.goBack(); await page.clock.runFor(80);
+    expect(new URL(page.url()).searchParams.get("time_format")).toBe("time");
+    expect((await paintedXAxis(chart)).every(label => /^\d{2}:\d{2}:\d{2}$/.test(label))).toBe(true);
+    await page.goForward(); await page.clock.runFor(80);
+    expect((await paintedXAxis(chart)).every(label => /^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
+    await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
+    expect(requests.filter(request => request.path === "/api/snapshots/query")).toHaveLength(readCount);
+    await page.clock.resume();
+    await page.reload();
+    await expect(chart.locator("canvas")).toBeVisible();
+    expect((await paintedXAxis(chart)).every(label => /^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
+    await range.selectOption("custom");
+    await expect(page.getByRole("combobox", {name: "X-axis labels", exact: true})).toHaveValue("date");
+    await page.keyboard.press("Escape");
+    await choose("auto");
+    expect(new URL(page.url()).searchParams.has("time_format")).toBe(false);
+    expect((await paintedXAxis(chart)).some(label => !/^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
+  });
+
+  test("previews inherit Date while elapsed/logical alignments retain native units and mobile controls fit", async ({page}) => {
+    await recordCanvasText(page);
+    await seedWorkspace(page, [{path: "/progress/loss", size: "wide"}]);
+    const requests = await mockApi(page);
+    await page.goto("/rvx?runs=run-1&axis=wall_time&time_format=date");
+    const chart = page.locator(".chart-grid .chart-card");
+    await expect(chart.locator("canvas")).toBeVisible();
+    await chart.locator(".menu-trigger").click();
+    await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
+    const editor = page.getByRole("dialog", {name: "Edit panel", exact: true});
+    await expect(editor.locator(".chart-preview canvas")).toBeVisible();
+    const preview = await paintedXAxis(editor.locator(".chart-preview"));
+    expect(preview.length).toBeGreaterThan(0);
+    expect(preview.every(label => /^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
+    await page.keyboard.press("Escape");
+    await chart.locator(".chart-host").focus(); await page.keyboard.press("ArrowLeft");
+    await expect(chart.getByRole("tooltip")).toContainText("2026");
+    await expect(chart.getByRole("tooltip")).toContainText(/\d{2}:\d{2}/);
+    await page.goto("/rvx?runs=run-1&axis=elapsed&time_format=date");
+    await expect(chart.locator("canvas")).toBeVisible();
+    expect((await paintedXAxis(chart)).some(label => /[dhms]/.test(label))).toBe(true);
+    await page.setViewportSize({width: 320, height: 844});
+    await page.getByRole("combobox", {name: "Time range", exact: true}).selectOption("custom");
+    const settings = page.getByRole("dialog", {name: "Time settings", exact: true});
+    const labels = settings.getByRole("combobox", {name: "X-axis labels", exact: true});
+    await expect(labels).toBeDisabled();
+    await settings.getByRole("combobox", {name: "Alignment", exact: true}).selectOption("wall_time");
+    await expect(labels).toBeEnabled(); await expect(labels).toHaveValue("date");
+    expect(await settings.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    await settings.getByRole("combobox", {name: "Alignment", exact: true}).selectOption("optimizer_step");
+    await expect(labels).toBeDisabled();
+    await settings.getByRole("button", {name: "Apply time settings"}).click();
+    await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.axis).toBe("optimizer_step");
+    await expect(chart.locator("canvas")).toBeVisible();
+    expect((await paintedXAxis(chart)).every(label => !/^\d{4}-\d{2}-\d{2}$|^\d{2}:\d{2}/.test(label))).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
 });

@@ -23,7 +23,8 @@ async function visualFixture(page: Page, view: SnapshotView, overrides: Partial<
   const calls = {records: [] as SnapshotRecordsRequest[], aggregate: [] as SnapshotAggregateRequest[], rows: [] as TableRowsRequest[]};
   const snapshots = new Map<string, TableSource>(), totals = new Map<string, number>(), savedRows = new Map<string, TableDataRow>();
   let gate: Promise<void> | null = null, release = (): void => {};
-  const columns = ["id", "name", "status", "queue", "value", "extra"].map(name => ({path: `/${name}`, name, kinds: [name === "value" || name === "extra" ? "number" : "string"]}));
+  const columns = ["id", "name", "status", "queue", "value", "extra", "submitted_at", "started_at", "finished_at", "runtime_seconds"]
+    .map(name => ({path: `/${name}`, name, kinds: [["value", "extra", "submitted_at", "started_at", "finished_at", "runtime_seconds"].includes(name) ? "number" : "string"]}));
   const currentSources = (runIds: string[], sourceIds?: string[]) => Array.from({length: state.sourceCount}, (_, index) =>
     publishers[index] ?? {run: "run-1", source: `run-1-extra-${index}`, label: `Worker ${index}`}).flatMap((owner, index) => {
     if (!runIds.includes(owner.run) || sourceIds && !sourceIds.includes(owner.source)) return [];
@@ -63,7 +64,9 @@ async function visualFixture(page: Page, view: SnapshotView, overrides: Partial<
         row_key: String(state.reverse ? 100_000 - index : index),
         cells: {"/id": cell(id), "/name": cell(`Task ${index}`), "/queue": cell(index % 2 ? "Long queue / secondary" : "Primary queue"),
           "/status": index === 0 && version > 0 ? cell("Failed") : states[index % states.length]!,
-          "/value": cell(index === 0 ? "18446744073709551615" : String(index), "number"), "/extra": extraCell(index, total)}};
+          "/value": cell(index === 0 ? "18446744073709551615" : String(index), "number"), "/extra": extraCell(index, total),
+          "/submitted_at": cell("1792135907", "number"), "/started_at": cell("1792136358", "number"),
+          "/finished_at": cell("null", "null"), "/runtime_seconds": cell("3661", "number")}};
       savedRows.set(JSON.stringify([row.snapshot_id, row.source_id, row.row_key]), row); return row;
     });
     return route.fulfill({json: {columns, snapshots: sources, rows, identities: rows.map(row => `string:${row.cells["/id"]!.text}`), offset, limit: body.limit ?? 1000, total}});
@@ -125,6 +128,149 @@ async function visualFixture(page: Page, view: SnapshotView, overrides: Partial<
   return {state, calls, base, holdCounts: () => {gate = new Promise<void>(resolve => {release = resolve;});},
     releaseCounts: () => {gate = null; release();}};
 }
+
+test("status hover preserves state colors and workload times are readable in hover and details", async ({page}) => {
+  await page.emulateMedia({reducedMotion: "reduce"});
+  const fixture = await visualFixture(page, {...statusView, valuePath: "/runtime_seconds"});
+  fixture.state.total = 9;
+  await page.goto("/rvx?runs=run-1");
+  const card = page.locator(".section-grid .snapshot-visual-card");
+  await expect(card).toHaveAttribute("data-loaded", "true");
+  const first = card.locator(".sv-task-cell").first();
+  const before = await first.evaluate(node => ({color: getComputedStyle(node).backgroundColor, size: node.getBoundingClientRect().width}));
+  await first.hover();
+  await expect(card.getByRole("tooltip")).toContainText("1h 1m 1s");
+  expect(await first.evaluate(node => ({color: getComputedStyle(node).backgroundColor, size: node.getBoundingClientRect().width}))).toEqual(before);
+  await expect(first).toHaveCSS("filter", "none");
+  await expect(first).toHaveCSS("outline-style", "solid");
+  await expect(first).toHaveCSS("outline-width", "1px");
+  await first.click();
+  const drawer = page.getByRole("dialog", {name: "Task details", exact: true});
+  await expect(drawer).toContainText("1h 1m 1s");
+  const submitted = drawer.locator(".sv-task-value[title='number: 1792135907']");
+  await expect(submitted).toContainText("2026");
+  await expect(submitted).not.toHaveText("1792135907");
+  await expect(drawer.locator(".sv-task-value[data-kind='null']")).toHaveText("null");
+});
+
+test("status hover clears in cell gaps and after the final task, with space for the first column outline", async ({page}) => {
+  const fixture = await visualFixture(page, statusView);
+  fixture.state.total = 9;
+  await page.goto("/rvx?runs=run-1");
+  const card = page.locator(".snapshot-visual-card");
+  await expect(card).toHaveAttribute("data-loaded", "true");
+  const cells = card.locator(".sv-task-cell"), first = cells.first();
+  await first.hover();
+  const viewport = (await card.locator(".sv-status-viewport").boundingBox())!;
+  const box = (await first.boundingBox())!;
+  expect(box.x - viewport.x).toBeGreaterThanOrEqual(2);
+  await expect(card.getByRole("tooltip")).toBeVisible();
+  await page.mouse.move(box.x + box.width + 2, box.y + box.height / 2);
+  await expect(card.getByRole("tooltip")).toHaveCount(0);
+  await cells.last().hover();
+  await expect(card.getByRole("tooltip")).toBeVisible();
+  const final = (await cells.last().boundingBox())!;
+  await page.mouse.move(final.x + final.width + 3, final.y + final.height / 2);
+  await expect(card.getByRole("tooltip")).toHaveCount(0);
+  await first.focus();
+  await expect(card.getByRole("tooltip")).toBeVisible();
+  await page.keyboard.press("ArrowRight");
+  await expect(card.getByRole("tooltip")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(card.getByRole("tooltip")).toHaveCount(0);
+});
+
+for (const total of [9, 1000]) {
+  test(`status grid passes wheel scrolling to the workspace at its boundary (${total} tasks)`, async ({page}) => {
+    const fixture = await visualFixture(page, statusView); fixture.state.total = total;
+    await page.goto("/rvx?runs=run-1");
+    const card = page.locator(".section-grid .snapshot-visual-card");
+    await expect(card).toHaveAttribute("data-loaded", "true");
+    await expect.poll(() => card.locator(".sv-task-cell").count()).toBeGreaterThan(0);
+    await page.addStyleTag({content: ".chart-scroll::after {content: ''; display: block; height: 1200px;}"});
+    const grid = card.locator(".sv-status-viewport"), outer = page.locator(".chart-scroll");
+    const maxScroll = await grid.evaluate(node => node.scrollHeight - node.clientHeight);
+    expect(maxScroll > 0).toBe(total === 1000);
+    if (maxScroll > 0) {
+      await grid.hover(); await page.mouse.wheel(0, 100);
+      await expect.poll(() => grid.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      expect(await outer.evaluate(node => node.scrollTop)).toBe(0);
+    }
+    await grid.evaluate(node => {node.scrollTop = node.scrollHeight;});
+    await grid.hover(); await page.mouse.wheel(0, 180);
+    await expect.poll(() => outer.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  });
+}
+
+for (const overflow of [false, true]) {
+  test(`bars pass wheel scrolling to the workspace at their boundary (overflow: ${overflow})`, async ({page}) => {
+    const fixture = await visualFixture(page, barView); fixture.state.sourceCount = 1;
+    await page.addInitScript(overflow => {
+      document.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent = `.chart-scroll::after {content: ''; display: block; height: 1200px;}
+          ${overflow ? ".sv-bar-viewport {max-height: 100px;}" : ""}`;
+        document.head.append(style);
+      });
+    }, overflow);
+    await page.goto("/rvx?runs=run-1");
+    const card = page.locator(".section-grid .snapshot-visual-card");
+    await expect(card).toHaveAttribute("data-loaded", "true");
+    const viewport = card.locator(".sv-bar-viewport"), outer = page.locator(".chart-scroll");
+    expect(await viewport.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(overflow);
+    if (overflow) {
+      await viewport.hover(); await page.mouse.wheel(0, 40);
+      await expect.poll(() => viewport.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      expect(await outer.evaluate(node => node.scrollTop)).toBe(0);
+    }
+    await viewport.evaluate(node => {node.scrollTop = node.scrollHeight;});
+    await viewport.hover();
+    await expect(viewport).toHaveCSS("overscroll-behavior-y", "auto");
+    await page.mouse.wheel(0, 180);
+    await expect.poll(() => outer.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  });
+}
+
+test("workload table formats time cells, preserves raw data and lets an unscrollable table scroll its workspace", async ({page}) => {
+  await mockApi(page);
+  const fields = ["id", "submitted_at", "runtime_seconds"];
+  const columns = fields.map(name => ({path: `/${name}`, name, kinds: [name === "id" ? "string" : "number"]}));
+  const source: TableSource = {run_id: "run-1", source_id: "run-1-source-0", snapshot_id: "1000",
+    label: "Learner", role: "learner", rank: 0, node_id: "node-a", observed_at_ns: firstObservation, row_count: 1};
+  await seedUiState(page, {selected: {"experiment-1": "times"}, sets: [{id: "times", name: "Times", experimentId: "experiment-1",
+    sections: [{id: "main", name: "", collapsed: false}],
+    panels: [{id: "times", sectionId: "main", size: "wide", kind: "snapshot-table", path: "/tasks", title: "Times"}]}]});
+  await page.route("**/api/tables/catalog", route => route.fulfill({json: {tables: [
+    {path: "/tasks", name: "Tasks", columns, collection_kinds: ["array"], sources: [source]},
+  ], truncated: false}}));
+  const requests: TableRowsRequest[] = [];
+  await page.route("**/api/tables/rows", route => {
+    requests.push(route.request().postDataJSON());
+    return route.fulfill({json: {columns, snapshots: [source], rows: [{
+      run_id: source.run_id, source_id: source.source_id, snapshot_id: source.snapshot_id, row_key: "0",
+      cells: {"/id": cell("job-1"), "/submitted_at": cell("1792135907", "number"), "/runtime_seconds": cell("65", "number")},
+    }], total: 1, offset: 0, limit: 75}});
+  });
+  await page.goto("/rvx?runs=run-1");
+  const table = page.locator(".section-grid .table-card");
+  await expect(table.locator('td[data-column="/runtime_seconds"]')).toHaveText("1m 5s");
+  await expect(table.locator('td[data-column="/submitted_at"]')).toContainText("2026");
+  await expect(table.locator('td[data-column="/submitted_at"]')).toHaveAttribute("title", "number: 1792135907");
+  await table.locator('th[data-column="/runtime_seconds"] button').click();
+  await expect.poll(() => requests.at(-1)?.sort).toEqual({path: "/runtime_seconds", direction: "asc"});
+  const download = page.waitForEvent("download");
+  await table.getByRole("button", {name: "Export page CSV"}).click();
+  const stream = await (await download).createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream!) chunks.push(chunk);
+  const csv = Buffer.concat(chunks).toString();
+  expect(csv).toContain("1792135907"); expect(csv).toContain('"65"'); expect(csv).not.toContain("1m 5s");
+  await page.addStyleTag({content: ".chart-scroll::after {content: ''; display: block; height: 1200px;}"});
+  const viewport = table.locator(".table-scroll"), outer = page.locator(".chart-scroll");
+  expect(await viewport.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(false);
+  await viewport.hover(); await page.mouse.wheel(0, 180);
+  await expect.poll(() => outer.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+});
 
 test("bars retain native mixed-Source values, exact labels, negative stacks and responsive categorical labels", async ({page}) => {
   const fixture = await visualFixture(page, barView, {query: {filters: [{path: "/status", op: "eq", value: "ignored", enabled: false}]}});

@@ -3,7 +3,7 @@ import type {ChartCatalog} from "../domain/snapshots";
 import type {SummaryRow, TableCell, TableDataRow, TableDefinition, TableSource} from "../domain/tables";
 import type {ExperimentRun} from "../domain/types";
 import type {MetricCatalogQueryCoordinator} from "./coordinator";
-import {formatTime, observedTime, humanize, metricName, rangeBounds, type RangeState} from "./model";
+import {formatTime, observedTime, humanize, metricName, rangeBounds, sameQueryRange, type RangeState} from "./model";
 import {PanelChrome, type PanelAction} from "./panel-chrome";
 import {copyPanel, type ColumnPreference, type TablePanelSpec} from "./panels";
 import {collectionLabel, filterSummaryRows, TableView, type ViewColumn, type ViewRow} from "./table-view";
@@ -63,7 +63,7 @@ export class TablePanel {
   setContext(catalog: ChartCatalog, runs: ExperimentRun[], range: RangeState): void {
     const old = this.context;
     const changed = !old || old.runs.map(run => run.id).join("\0") !== runs.map(run => run.id).join("\0")
-      || this.spec.kind === "metric-table" && JSON.stringify(old.range) !== JSON.stringify(range);
+      || this.spec.kind === "metric-table" && !sameQueryRange(old.range, range);
     this.context = {catalog, runs, range: {...range}};
     if (changed) {this.cancel(); this.definition = null; this.summaryLoaded = false; this.loaded = false; this.view.clear(); this.registeredSources.clear();}
   }

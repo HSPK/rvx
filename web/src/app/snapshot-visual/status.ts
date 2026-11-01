@@ -2,7 +2,7 @@ import type {SnapshotAggregateResponse, SnapshotRecordsResponse, SnapshotStatusV
 import type {TableCell, TableDataRow, TableSource} from "../../domain/tables";
 import {missingCell} from "../table-view";
 import {el} from "../ui";
-import {cellText, provenance, type VisualNames, type VisualTooltip} from "./details";
+import {cellText, fieldCellText, provenance, type VisualNames, type VisualTooltip} from "./details";
 import {statusShade, statusShadeDomain, type ShadeDomain} from "./shading";
 
 export interface StatusTask {
@@ -11,7 +11,7 @@ export interface StatusTask {
 interface Placement {task: StatusTask; x: number; y: number; size: number; index: number}
 interface GroupHeading {key: string; label: string; y: number; run: string}
 interface LegendEntry {element: HTMLElement; label: HTMLElement; count: HTMLElement; color: HTMLInputElement | null}
-const normalBudget = 800, expandedBudget = 1800, headingHeight = 30;
+const normalBudget = 800, expandedBudget = 1800, headingHeight = 30, gridInset = 4;
 const stateColors: Readonly<Record<string, string>> = {
   running: "#427fc4", pending: "#bd942d", mixed: "#926bb6", finished: "#39926a", succeeded: "#39926a",
   completed: "#39926a", failed: "#c75454", cancelled: "#7d8391", canceled: "#7d8391",
@@ -62,9 +62,9 @@ export function statusTasks(response: SnapshotRecordsResponse, view: SnapshotSta
     seen.add(key);
     const group = view.groupPath !== undefined ? record.cells[view.groupPath] ?? missingCell : undefined;
     return {key, identity, record, state: record.cells[view.statusPath] ?? missingCell,
-      label: view.labelPath !== undefined ? cellText(record.cells[view.labelPath]) : view.idPaths.map(path => cellText(record.cells[path])).join(" · "),
+      label: view.labelPath !== undefined ? fieldCellText(view.labelPath, record.cells[view.labelPath]) : view.idPaths.map(path => cellText(record.cells[path])).join(" · "),
       group: JSON.stringify([record.run_id, record.source_id, group ? statusKey(group) : ""]),
-      groupLabel: group ? cellText(group) : ""};
+      groupLabel: group ? fieldCellText(view.groupPath!, group) : ""};
   }).sort((a, b) => a.group < b.group ? -1 : a.group > b.group ? 1 : 0);
 }
 
@@ -122,7 +122,11 @@ export class SnapshotStatusGrid {
     this.viewport.addEventListener("scroll", () => this.schedule(false), {passive: true, signal});
     this.viewport.addEventListener("keydown", event => this.navigate(event), {signal});
     this.viewport.addEventListener("pointerover", event => this.hover(event.target), {signal});
+    this.viewport.addEventListener("pointerout", event => {
+      if (this.target(event.target) !== this.target(event.relatedTarget)) this.tooltip.hide();
+    }, {signal});
     this.viewport.addEventListener("pointerleave", () => this.tooltip.hide(), {signal});
+    this.viewport.addEventListener("pointercancel", () => this.tooltip.hide(), {signal});
     this.viewport.addEventListener("focusin", event => {
       const button = this.target(event.target);
       if (button) {this.select(button.dataset.taskKey!); this.hover(button);}
@@ -198,7 +202,8 @@ export class SnapshotStatusGrid {
   private renderShadeLegend(): void {
     if (!this.shadeDomain || this.shadePath === undefined) {this.shadeLegend.remove(); return;}
     const {bounds, unavailable} = this.shadeDomain;
-    const range = bounds ? bounds.span === 0n ? bounds.minimum.text : `${bounds.minimum.text} – ${bounds.maximum.text}` : "No numeric values";
+    const formatted = (text: string): string => fieldCellText(this.shadePath!, {kind: "number", text, truncated: false});
+    const range = bounds ? bounds.span === 0n ? formatted(bounds.minimum.text) : `${formatted(bounds.minimum.text)} – ${formatted(bounds.maximum.text)}` : "No numeric values";
     const scale = this.shadeDomain.scale === "log" ? "Log" : "Linear";
     const label = `${this.names.fieldName(this.shadePath)} · ${range} · ${scale}${unavailable ? ` · ${unavailable} unavailable` : ""}`;
     const ramp = el("span", "sv-shade-ramp");
@@ -215,14 +220,14 @@ export class SnapshotStatusGrid {
   /** Lay out native-ordered tasks in responsive rows while keeping publisher/group boundaries intact. */
   private layout(): void {
     if (!this.view) return;
-    const width = Math.max(1, this.viewport.clientWidth), height = this.viewport.clientHeight || 320;
+    const width = Math.max(1, this.viewport.clientWidth - gridInset * 2), height = this.viewport.clientHeight || 320;
     const geometry = gridGeometry(width, height, this.view, Boolean(this.element.closest(".is-expanded")), this.tasks.length);
     this.pitch = geometry.pitch; this.columns = geometry.columns;
     this.canvas.dataset.columns = String(this.columns);
     this.placements = []; this.positions.clear(); this.groups = [];
     const sourceCounts = new Map<string, number>();
     for (const source of this.snapshots.values()) sourceCounts.set(source.run_id, (sourceCounts.get(source.run_id) ?? 0) + 1);
-    let current = "", y = 0, local = 0;
+    let current = "", y = gridInset, local = 0;
     for (const [index, task] of this.tasks.entries()) {
       if (task.group !== current) {
         if (current) y += Math.ceil(local / this.columns) * this.pitch + 10;
@@ -234,10 +239,10 @@ export class SnapshotStatusGrid {
           y, run: task.record.run_id});
         y += headingHeight;
       }
-      const placement = {task, x: local % this.columns * this.pitch, y: y + Math.floor(local / this.columns) * this.pitch, size: geometry.size, index};
+      const placement = {task, x: gridInset + local % this.columns * this.pitch, y: y + Math.floor(local / this.columns) * this.pitch, size: geometry.size, index};
       this.placements.push(placement); this.positions.set(task.key, placement); local++;
     }
-    const heightNeeded = y + Math.ceil(local / this.columns) * this.pitch;
+    const heightNeeded = y + Math.ceil(local / this.columns) * this.pitch + gridInset;
     this.canvas.style.height = `${Math.max(heightNeeded, this.tasks.length ? 60 : 90)}px`;
     this.viewport.style.setProperty("--sv-content-height", `${Math.max(100, Math.min(360, heightNeeded))}px`);
     this.viewport.scrollTop = Math.min(this.viewport.scrollTop, Math.max(0, heightNeeded - this.viewport.clientHeight));
@@ -330,14 +335,14 @@ export class SnapshotStatusGrid {
   /** Show one task's exact mapped fields and immutable Source observation on hover or focus. */
   private hover(target: EventTarget | null): void {
     const button = this.target(target), task = button ? this.byKey.get(button.dataset.taskKey!) : undefined;
-    if (!button || !task || !this.view) return;
+    if (!button || !task || !this.view) {this.tooltip.hide(); return;}
     this.tooltip.show(button, task.label, [
       [this.names.fieldName(this.view.statusPath), cellText(task.state)],
       ...this.view.idPaths.filter(path => path !== this.view!.labelPath && path !== this.view!.statusPath)
         .map((path): [string, string] => [this.names.fieldName(path), cellText(task.record.cells[path])]),
-      ...(this.view.valuePath !== undefined ? [[this.names.fieldName(this.view.valuePath), cellText(task.record.cells[this.view.valuePath])] as [string, string]] : []),
+      ...(this.view.valuePath !== undefined ? [[this.names.fieldName(this.view.valuePath), fieldCellText(this.view.valuePath, task.record.cells[this.view.valuePath])] as [string, string]] : []),
       ...(this.shadePath !== undefined && ![this.view.valuePath, this.view.statusPath, ...this.view.idPaths].includes(this.shadePath)
-        ? [[this.names.fieldName(this.shadePath), cellText(task.record.cells[this.shadePath])] as [string, string]] : []),
+        ? [[this.names.fieldName(this.shadePath), fieldCellText(this.shadePath, task.record.cells[this.shadePath])] as [string, string]] : []),
       ...(this.shades.get(task.key) === null ? [["Shade", "Unavailable"] as [string, string]] : []),
       ...provenance(task.record.run_id, task.record.source_id, this.snapshots.get(task.record.snapshot_id), this.names),
     ]);

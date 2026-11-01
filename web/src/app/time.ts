@@ -1,5 +1,21 @@
+import type {TableCell} from "../domain/tables";
+
 export type BoundResult = {ok: true; value: number | undefined} | {ok: false; error: string};
+export type TimeAxisFormat = "auto" | "time" | "date";
 const units: Record<string, bigint> = {d: 86400_000000000n, h: 3600_000000000n, m: 60_000000000n, s: 1_000000000n, ms: 1_000000n, us: 1_000n, ns: 1n};
+
+/** Recognize workload time fields in seconds, never infer units from a number's magnitude. */
+export function temporalCellText(path: string, cell: TableCell | undefined): string | null {
+  if (cell?.kind !== "number" || cell.truncated || !cell.text.trim()) return null;
+  const value = Number(cell.text), field = path.split("/").at(-1);
+  if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) return null;
+  if (field === "runtime_seconds") return value >= 0 ? elapsedTick(value) : null;
+  if (!["submitted_at", "started_at", "finished_at"].includes(field ?? "")) return null;
+  const date = new Date(value * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
+  return date.toLocaleString(undefined, {year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZoneName: "short"});
+}
 
 /** Keep submitted coordinates within signed storage bounds and serialize them without silent rounding. */
 function coordinate(value: bigint): BoundResult {
@@ -48,6 +64,19 @@ export function parseTimeBound(input: string, axis: string): BoundResult {
 function localDateTime(date: Date): string {
   const pad = (value: number): string => String(value).padStart(2, "0");
   return `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/** Format local wall-clock ticks without repeating the same calendar date within a day. */
+export function wallTimeLabels(seconds: number[], format: Exclude<TimeAxisFormat, "auto">, increment: number): (string | null)[] {
+  let previous = "";
+  return seconds.map(value => {
+    const date = new Date(Math.round(value * 1000)), local = localDateTime(date);
+    const label = format === "date" ? local.slice(0, 10)
+      : local.slice(11) + (increment < 1 ? `.${String(date.getMilliseconds()).padStart(3, "0")}` : "");
+    if (format === "date" && label === previous) return null;
+    previous = label;
+    return label;
+  });
 }
 
 /** Provide editable human values; callers retain the original bound when this text is unchanged. */

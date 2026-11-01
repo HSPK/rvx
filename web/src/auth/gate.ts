@@ -1,5 +1,6 @@
 import "./auth.css";
-import {el} from "../app/ui";
+import {button, el} from "../app/ui";
+import {brandMark} from "../app/brand";
 import {SignInForm} from "./form";
 import {authenticationRequired, authenticationRestored, getSession, type SessionStatus} from "./session";
 
@@ -20,12 +21,27 @@ export class AuthenticationGate {
     const modal = el("dialog", "auth-lock"); this.modal = modal;
     modal.setAttribute("aria-label", "Sign in again");
     modal.addEventListener("cancel", event => event.preventDefault());
+    document.body.append(modal); modal.showModal();
+    void this.verify(modal);
+  }
+  private async verify(modal: HTMLDialogElement): Promise<void> {
+    const card = el("section", "auth-card"), heading = el("h1", "auth-title", "Checking session");
+    const description = el("p", "auth-description", "Verifying your existing sign-in. Your changes are still here.");
+    card.append(brandMark(), heading, description); modal.replaceChildren(card);
+    let status: SessionStatus;
+    try {status = await getSession(this.lifetime.signal);}
+    catch {
+      if (this.modal !== modal || this.lifetime.signal.aborted) return;
+      heading.textContent = "Unable to verify session";
+      description.textContent = "The authentication service could not be reached. Check your connection and retry. Your changes are still here.";
+      const retry = button("Retry", () => {void this.verify(modal);}, "auth-submit");
+      card.append(retry); retry.focus();
+      return;
+    }
+    if (this.modal !== modal || this.lifetime.signal.aborted) return;
+    if (status.authenticated) {this.restore(status); return;}
     this.form = new SignInForm(status => this.restore(status), true);
-    modal.append(this.form.element); document.body.append(modal); modal.showModal(); this.form.focus();
-    // Another tab may already have renewed the browser's cookie while this request was in flight.
-    void getSession(this.lifetime.signal).then(status => {
-      if (this.modal === modal && status.authenticated) this.restore(status);
-    }, () => {if (this.modal === modal && !this.lifetime.signal.aborted) this.form?.sessionCheckFailed();});
+    modal.replaceChildren(this.form.element); this.form.focus();
   }
   /** Resume only verified sessions, including documents restored from browser history. */
   restore(status: SessionStatus): void {

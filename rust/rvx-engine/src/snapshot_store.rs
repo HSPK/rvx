@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::{EngineError, Result};
 
+mod query;
 pub(crate) mod tables;
 
 const MAX_QUERY_SCAN_ROWS: usize = 100_000;
@@ -510,6 +511,21 @@ impl SnapshotStore {
                 format!("({})", ranges.join(" OR "))
             });
         }
+        if request.axis != "wall_time" && request.axis != "elapsed" {
+            let mut axis_filter = Filter::new();
+            axis_filter.push("name=?", request.axis.clone().into());
+            if let Some(from) = request.from {
+                axis_filter.push("value>=?", from.into());
+            }
+            if let Some(to) = request.to {
+                axis_filter.push("value<=?", to.into());
+            }
+            filter.clauses.push(format!(
+                "EXISTS (SELECT 1 FROM chart_axes WHERE snapshot_id=s.id AND {})",
+                axis_filter.clauses.join(" AND ")
+            ));
+            filter.values.extend(axis_filter.values);
+        }
         let mut field_filter = Filter::new();
         field_filter.ids("run_id", &request.run_ids);
         field_filter.ids("source_id", &request.source_ids);
@@ -638,8 +654,12 @@ impl SnapshotStore {
     }
 
     /// Project numeric fields without merging observations or constructing an independent metric log.
-    pub fn query(&self, request: &SnapshotQueryRequest) -> Result<SnapshotQueryResponse> {
-        let Projection { known, groups } = self.projection(request, || Ok(()))?;
+    fn query_page(
+        &self,
+        request: &SnapshotQueryRequest,
+        control: &tables::TableReadControl,
+    ) -> Result<SnapshotQueryResponse> {
+        let Projection { known, groups } = self.projection(request, || control.check())?;
         let mut response = SnapshotQueryResponse {
             axis: request.axis.clone(),
             series: Vec::new(),
@@ -647,6 +667,7 @@ impl SnapshotStore {
         let mut output_points = 0;
         let mut output_bytes = PAGE_ENVELOPE_RESERVE;
         for ((run_id, source_id), mut points) in groups {
+            control.check()?;
             points.sort_by_key(|p| (p.axis, p.observed, p.sequence));
             let count = points.len().min(request.max_points);
             for (path_index, path) in request.paths.iter().enumerate() {
@@ -770,12 +791,19 @@ impl Projected {
 
 /// Keep actual missing observations when sampling would otherwise join across a known gap.
 fn projection_positions(points: &[Projected], path: usize, count: usize) -> Vec<usize> {
+    sample_positions(points.len(), count, |index| {
+        points[index].values[path].is_none()
+    })
+}
+
+/// Sample actual positions while retaining a missing observation between numeric endpoints.
+fn sample_positions(length: usize, count: usize, missing: impl Fn(usize) -> bool) -> Vec<usize> {
     let mut positions: Vec<_> = (0..count)
         .map(|index| {
             if count == 1 {
-                points.len() - 1
+                length - 1
             } else {
-                index * (points.len() - 1) / (count - 1)
+                index * (length - 1) / (count - 1)
             }
         })
         .collect();
@@ -784,10 +812,10 @@ fn projection_positions(points: &[Projected], path: usize, count: usize) -> Vec<
     for right in (1..positions.len()).rev() {
         let left_index = positions[right - 1];
         let right_index = positions[right];
-        if points[left_index].values[path].is_some() && points[right_index].values[path].is_some() {
+        if !missing(left_index) && !missing(right_index) {
             if let Some(gap) = (left_index + 1..right_index)
                 .rev()
-                .find(|&index| points[index].values[path].is_none())
+                .find(|&index| missing(index))
             {
                 positions[right - 1] = gap;
             }
@@ -2248,7 +2276,7 @@ mod tests {
     }
 
     #[test]
-    fn observation_scan_budget_is_explicit_and_elapsed_ranges_use_the_index() {
+    fn long_chart_histories_use_bounded_windows_and_preserve_gaps_on_every_axis() {
         let dir = crate::test_directory().unwrap();
         let store = SnapshotStore::open(&dir.path().join("snapshots.db")).unwrap();
         let source = source("source", "run");
@@ -2267,6 +2295,8 @@ mod tests {
                 '{{\"source_session_id\":\"session\",\"sequence\":'||n||',\"observed_at_ns\":'||n||',\"schema_version\":1,\"axes\":{{}},\"state\":{{}}}}'
              FROM sequence;
              INSERT INTO chart_observations SELECT id,0,'[]' FROM snapshots WHERE id>1;
+             INSERT INTO chart_axes SELECT id,'step',sequence FROM snapshots WHERE id>1;
+             INSERT INTO chart_values VALUES ({count},'/loss',2.0);
              UPDATE chart_runs SET snapshot_count={count},last_observed_at_ns={MAX_QUERY_SCAN_ROWS};
              UPDATE chart_index_meta SET last_id={count};
              UPDATE snapshot_heads SET snapshot_id={count};
@@ -2276,26 +2306,52 @@ mod tests {
         drop(connection);
         let mut request = query("run", &["/loss"]);
         assert!(store
-            .query(&request)
+            .query_page(&request, &tables::TableReadControl::default())
             .unwrap_err()
             .to_string()
             .contains("scan budget"));
-        request.from = Some(MAX_QUERY_SCAN_ROWS as i64 - 9);
-        for axis in ["wall_time", "elapsed"] {
+        for axis in ["wall_time", "elapsed", "step"] {
             request.axis = axis.into();
             let result = store.query(&request).unwrap();
-            assert_eq!(result.series[0].values, vec![None; 10]);
+            let series = &result.series[0];
+            assert!(series.values.len() <= request.max_points);
+            assert_eq!(
+                series.snapshot_ids.last(),
+                Some(&((MAX_QUERY_SCAN_ROWS + 1) as i64))
+            );
+            assert_eq!(series.values.last(), Some(&Some(2.0)));
+            for pair in series.snapshot_ids.windows(2) {
+                assert!(pair[0] < pair[1]);
+            }
+            request.max_points = 2;
+            let result = store.query(&request).unwrap();
+            assert_eq!(result.series[0].values, vec![None, Some(2.0)]);
+            assert_eq!(
+                result.series[0].sequences.last(),
+                Some(&(MAX_QUERY_SCAN_ROWS as u64))
+            );
+            request.max_points = 1000;
+        }
+        request.from = Some(MAX_QUERY_SCAN_ROWS as i64 - 9);
+        for axis in ["wall_time", "elapsed", "step"] {
+            request.axis = axis.into();
+            let result = store.query(&request).unwrap();
+            assert_eq!(result.series[0].values.len(), 10);
+            assert_eq!(result.series[0].values.last(), Some(&Some(2.0)));
             assert_eq!(
                 result.series[0].snapshot_ids.last(),
                 Some(&((MAX_QUERY_SCAN_ROWS + 1) as i64))
             );
         }
-        request.axis = "step".into();
+        let control = tables::TableReadControl::default();
+        control.cancel();
         assert!(store
-            .query(&request)
+            .query_controlled(&request, &control)
             .unwrap_err()
             .to_string()
-            .contains("scan budget"));
+            .contains("cancelled"));
+        request.axis = "unrecorded".into();
+        assert!(store.query(&request).unwrap().series.is_empty());
     }
 
     #[test]

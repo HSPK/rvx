@@ -284,6 +284,15 @@ impl Engine {
         self.snapshots.query(request)
     }
 
+    /// Cancel abandoned long-history chart reads independently from other readers and ingestion.
+    pub fn snapshot_query_controlled(
+        &self,
+        request: &SnapshotQueryRequest,
+        control: &TableReadControl,
+    ) -> Result<SnapshotQueryResponse> {
+        self.snapshots.query_controlled(request, control)
+    }
+
     /// Resolve chart-point provenance to the original stored observation, including its full state.
     pub fn snapshot_get(&self, id: i64) -> Result<StoredSnapshot> {
         self.snapshots.get(id)

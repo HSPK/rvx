@@ -105,6 +105,7 @@ export function dialog(title: string, className = "", onClose?: () => void): {no
   const header = el("header", "dialog-header");
   const previousFocus = document.activeElement as HTMLElement | null;
   let closed = false;
+  let backdropPointer: number | null = null;
   // Native close events are queued; dispose drafts and reads before returning to the workspace.
   const finish = (): void => {
     if (closed) return;
@@ -117,11 +118,18 @@ export function dialog(title: string, className = "", onClose?: () => void): {no
   node.append(header, body);
   node.addEventListener("close", finish, {once: true});
   node.addEventListener("cancel", event => {event.preventDefault(); close();});
+  // Native pickers can retarget the final click; only a gesture starting on the backdrop may dismiss.
+  const onBackdrop = (event: MouseEvent): boolean => {
+    if (event.target !== node) return false;
+    const rect = node.getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+  };
+  node.addEventListener("pointerdown", event => {backdropPointer = onBackdrop(event) ? event.pointerId : null;});
+  node.addEventListener("pointercancel", () => {backdropPointer = null;});
   node.addEventListener("click", event => {
-    if (event.target === node) {
-      const rect = node.getBoundingClientRect();
-      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close();
-    }
+    const dismiss = backdropPointer !== null && onBackdrop(event);
+    backdropPointer = null;
+    if (dismiss) close();
   });
   document.body.append(node);
   node.showModal();

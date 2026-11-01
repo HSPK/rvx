@@ -3,7 +3,7 @@ import type {ChartMetric, SnapshotQuerySeries} from "../domain/snapshots";
 import type {ExperimentRun} from "../domain/types";
 import {axisLabel, compatibleMetrics, copyChart, duration, formatNumber, formatTime, metricName, pointId, reporters, type ChartSpec} from "./model";
 import {button, el} from "./ui";
-import {elapsedIncrements, elapsedTick} from "./time";
+import {elapsedIncrements, elapsedTick, wallTimeLabels, type TimeAxisFormat} from "./time";
 import {PanelChrome, type PanelAction} from "./panel-chrome";
 import {ChartHover} from "./chart-hover";
 
@@ -63,6 +63,7 @@ export class ChartRenderer {
   private interacted = false;
   private signature = "";
   private axis = "wall_time";
+  private timeFormat: TimeAxisFormat = "auto";
   private zoomed = false;
   private reset: HTMLButtonElement;
   private zoomState = el("span", "chart-zoom-state", "Zoomed");
@@ -162,6 +163,14 @@ export class ChartRenderer {
   }
   /** Restore a nearby editing target after an adjacent chart is removed. */
   focusOptions(): void {this.chrome.trigger.focus();}
+  /** Redraw calendar or clock labels without replacing the canvas, querying data or resetting zoom. */
+  setTimeFormat(format: TimeAxisFormat = "auto"): void {
+    if (this.timeFormat === format) return;
+    this.timeFormat = format;
+    if (this.axis !== "wall_time" || !this.plot) return;
+    const resume = this.hover.visible ? this.hoverMode : null;
+    this.hideHover(); this.plot.redraw(true, true); this.resizePlot(); this.restoreHover(resume);
+  }
   get hasFailure(): boolean {return this.element.classList.contains("chart-failed");}
   /** Route existing feedback through the shared header. */
   private get status(): HTMLElement {return this.chrome.status;}
@@ -524,7 +533,13 @@ export class ChartRenderer {
             values: (_u, values) => values.map(formatNumber), grid: {stroke: () => color("--chart-line"), width: 1}, ticks: {show: false}},
         ],
         series: [{}, ...this.traces.map(trace => this.plotSeries(trace))],
-        hooks: {setSelect: [plot => {
+        hooks: {init: [plot => {
+          if (this.axis !== "wall_time") return;
+          const axis = plot.axes[0]!, automatic = axis.values;
+          if (typeof automatic !== "function") throw new Error("The wall-time axis requires a tick formatter.");
+          axis.values = (chart, splits, index, space, increment) => this.timeFormat === "auto"
+            ? automatic(chart, splits, index, space, increment) : wallTimeLabels(splits, this.timeFormat, increment);
+        }], setSelect: [plot => {
           // uPlot commits valid selections even when mouseup occurs outside this chart.
           if (plot.select.width >= 6) {this.zoomed = true; this.updateZoom(); this.hideHover();}
         }], setScale: [(plot, scale) => {

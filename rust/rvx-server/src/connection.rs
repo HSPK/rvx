@@ -205,11 +205,24 @@ async fn heartbeat(
                     close(&mut socket, 1001, "server shutting down").await;
                     return;
                 }
-                result = timeout(SEND_TIMEOUT, session.active()) => matches!(result, Ok(Ok(true))),
+                result = timeout(SEND_TIMEOUT, session.active()) => result,
             };
-            if !active {
-                close(&mut socket, 1008, "session expired or revoked").await;
-                return;
+            match active {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    close(&mut socket, 1008, "session expired or revoked").await;
+                    return;
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "WebSocket session verification failed");
+                    close(&mut socket, 1013, "authentication temporarily unavailable").await;
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("WebSocket session verification timed out");
+                    close(&mut socket, 1013, "authentication temporarily unavailable").await;
+                    return;
+                }
             }
         }
         tokio::select! {

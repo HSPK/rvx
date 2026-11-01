@@ -1,6 +1,7 @@
 import type {ChartCatalog, ChartMetric, ChartMetricSource, SnapshotQuerySeries} from "../domain/snapshots";
 import {exactProperty} from "../core/exact-json";
 import type {ExperimentRecord, ExperimentRun} from "../domain/types";
+import type {TimeAxisFormat} from "./time";
 
 export interface ChartPresentation {
   title?: string;
@@ -12,7 +13,7 @@ export interface ChartPresentation {
   yMax?: number;
 }
 export interface ChartSpec {path: string; paths?: string[]; size: "normal" | "wide"; presentation?: ChartPresentation}
-export interface RangeState {axis: string; window: string; from?: number; to?: number}
+export interface RangeState {axis: string; window: string; from?: number; to?: number; timeFormat?: TimeAxisFormat}
 export const timeWindowChoices: [string, string][] = [
   ["900", "15m"], ["3600", "1h"], ["21600", "6h"], ["86400", "24h"],
   ["259200", "3d"], ["604800", "7d"], ["all", "All"], ["custom", "Custom…"],
@@ -69,6 +70,7 @@ export function workspaceUrl(runIds: string[], range?: RangeState, filters?: Run
     url.searchParams.set("range", range.window);
     if (range.from !== undefined) url.searchParams.set("from", String(range.from));
     if (range.to !== undefined) url.searchParams.set("to", String(range.to));
+    if (range.timeFormat && range.timeFormat !== "auto") url.searchParams.set("time_format", range.timeFormat);
   }
   if (filters) for (const [key, value] of [["project", filters.project], ["experiment", filters.experiment], ["status", filters.status], ["q", filters.search]]) if (value) url.searchParams.set(key!, value);
   return url.pathname + url.search;
@@ -84,8 +86,15 @@ export function initialRange(url: URL): RangeState {
   const from = integer("from"), to = integer("to");
   const requested = url.searchParams.get("range") ?? (from !== undefined || to !== undefined ? "custom" : "all");
   const window = !["wall_time", "elapsed"].includes(axis) && requested !== "custom" ? "all" : requested;
+  const timeFormat = url.searchParams.get("time_format");
   return {axis, window: timeWindowChoices.some(([value]) => value === window) ? window : "all",
-    ...(from === undefined ? {} : {from}), ...(to === undefined ? {} : {to})};
+    ...(from === undefined ? {} : {from}), ...(to === undefined ? {} : {to}),
+    ...(timeFormat === "time" || timeFormat === "date" ? {timeFormat} : {})};
+}
+
+/** Compare query scope independently from display-only wall-time tick preferences. */
+export function sameQueryRange(a: RangeState, b: RangeState): boolean {
+  return a.axis === b.axis && a.window === b.window && a.from === b.from && a.to === b.to;
 }
 
 /** Restore rail filters independently of the selected traces. */

@@ -211,6 +211,11 @@ authenticated WebSocket heartbeat. Green means a matching pong was received;
 connecting/reconnecting/offline states are distinct. Hover or keyboard focus
 shows the measured WebSocket round-trip latency. Do not label an HTTP timing
 or local wall-clock difference as WebSocket latency.
+Disconnected/reconnecting text and compact update/settings failure notices sit
+immediately to the left of that dot, never in a banner above the layout.
+Full error details remain available on hover and to assistive technology, with
+quiet retry/dismiss controls; failures do not move the panels or discard their
+last successful observations.
 
 Layout edits include panel settings, additions/removal, section state/order,
 and table search/filter/column configuration. Hover, incoming observations,
@@ -444,7 +449,10 @@ Numeric columns also have Auto or 0-20 decimal places. Formatting rounds exact
 decimal text for display only; raw values still drive filtering, sorting,
 tooltips, and CSV export. Width/precision changes do not refetch snapshots.
 Filters retain their definitions when disabled, can be re-enabled individually,
-and can be edited rather than accumulating replacements. Only enabled
+and can be edited or explicitly deleted rather than accumulating replacements.
+Empty or whitespace-only filter drafts cannot be added or overwrite an existing
+condition. Selecting native dropdown options, including options outside the
+dialog's bounds, never dismisses the enclosing filter dialog. Only enabled
 conditions participate in reads. Reuse collation and decoded numeric keys
 instead of reparsing values inside every sort comparison.
 Numeric sorting must remain numeric, including
@@ -474,6 +482,9 @@ Routine source-observation counts and collection-discovery explanations
 do not occupy extra rows. Keep real errors and missing-data indications.
 Ordinary background refresh keeps rows visible without flashing Loading or
 rebuilding focused headers and column-resize handles.
+Unchanged cells retain their DOM attributes and text. Table and workspace
+scroll gestures defer incoming row painting until scrolling settles, then
+commit the latest received page without resetting either scroll position.
 
 Large cells are bounded previews with an explicit indication; complete snapshots
 remain available through the APIs/CLI, not a table Inspect action.
@@ -486,7 +497,8 @@ The current UI supports four selected Runs, 24 panels, 24 flat sections, and
 75 rows per table page. Combined plots use one scale and reject differing
 units; multiple Y axes are not implemented. Column controls use discovered
 fields; arbitrary nested-column authoring remains an API capability rather
-than an editor control. Wide tables scroll horizontally.
+than an editor control. Wide tables retain horizontal wheel, touch and keyboard
+scrolling without a horizontal scrollbar; the vertical scrollbar remains.
 
 ### Reading values and Run configuration
 
@@ -538,6 +550,15 @@ or rewrite stored snapshots or their public API contracts.
   are rejected explicitly.
 - Elapsed tick spacing uses readable duration intervals, without changing
   the underlying observation coordinates or resampling the data.
+- Time settings let observation-time X axes show **Auto**, local **Time**
+  (`HH:mm:ss`, with milliseconds for subsecond ticks), or local **Date**
+  (`YYYY-MM-DD`). Date labels do not repeat within the same day. Auto preserves
+  the adaptive native calendar labels. Elapsed and logical axes retain their
+  own units; the clock/date selector is disabled for those alignments.
+  This shared display-only preference round-trips as `time_format` in the URL,
+  including reload and browser history, without refetching observations,
+  resetting local zoom, changing exact bounds, or editing saved layouts.
+  Chart previews use the same choice; hover readouts retain full timestamps.
 - There is no globally synchronized step or atomic snapshot across roles.
 
 Missing fields and missing observations are different from zero. Known gaps

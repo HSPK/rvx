@@ -2,7 +2,7 @@ import type {ChartCatalog, ChartMetric} from "../domain/snapshots";
 import type {ExperimentRun} from "../domain/types";
 import {ChartRenderer} from "./chart";
 import {MetricCatalogQueryCoordinator} from "./coordinator";
-import {axisLabel, chartPaths, defaultCharts, formatTime, observedTime, humanize, rangeBounds, reporters, timeWindowChoices, type RangeState} from "./model";
+import {axisLabel, chartPaths, defaultCharts, formatTime, observedTime, humanize, rangeBounds, reporters, sameQueryRange, timeWindowChoices, type RangeState} from "./model";
 import {AddEditor, type AddResult} from "./add-editor";
 import {PanelLayout, type LayoutView} from "./panel-layout";
 import {chartPanel, copyLayout, copyPanel, emptyLayout, isSnapshotVisual, type PanelSpec, type TablePanelSpec, type WorkspaceLayout, type WorkspaceSet} from "./panels";
@@ -67,7 +67,7 @@ export class ChartWorkspace {
   constructor(private runIds: string[], private metadata: RunMetadata, private reads: MetricCatalogQueryCoordinator, private preferences: PreferencesStore,
     range: RangeState, private colorFor: (id: string) => string, private labelFor: (run: ExperimentRun) => string, private openRuns: () => void, private toggleRun: (id: string) => void,
     private rangeUpdated: (range: RangeState) => void, refreshRuns: () => void, private openRunDetails: (runId: string) => void,
-    private openRunColor: (runId: string) => void) {
+    private openRunColor: (runId: string) => void, private updateConnectionNotice: (text: string | null) => void = () => {}) {
     this.runIds = [...runIds]; this.range = {...range};
     this.session.open(this.layout, this.experimentId);
     this.setupRefresh = button("Refresh runs", refreshRuns, "button primary"); this.setupRefresh.setAttribute("aria-label", "Refresh runs");
@@ -136,16 +136,19 @@ export class ChartWorkspace {
   /** Reconcile URL and peer Run selection without recreating panel instances or persistent ordering. */
   setSelection(runIds: string[], metadata: RunMetadata, range: RangeState, outsideFilters: string[]): void {
     const oldRuns = this.runs.map(run => run.id).join("\0"), changedIds = this.runIds.join("\0") !== runIds.join("\0");
-    const changedRange = JSON.stringify(this.range) !== JSON.stringify(range), changedMetadata = this.metadata !== metadata;
+    const changedRange = !sameQueryRange(this.range, range), changedFormat = this.range.timeFormat !== range.timeFormat;
+    const changedMetadata = this.metadata !== metadata;
     this.runIds = [...runIds]; this.metadata = metadata; this.outsideFilters = outsideFilters; this.range = {...range};
     const scope = changedIds || oldRuns !== this.runs.map(run => run.id).join("\0");
-    if (scope || changedRange) this.openDialog?.close();
+    if (scope || changedRange || changedFormat) this.openDialog?.close();
     if (this.runs[0]) this.lastExperimentId = this.runs[0].experiment_id;
     if (scope) {
+      this.updateConnectionNotice(null);
       this.catalogRequest?.abort(); this.queryRequest?.abort(); this.catalog = null;
       for (const card of this.cards.values()) card.setScope(this.runs);
     }
     this.updateHeading(); this.updateControls();
+    if (changedFormat) this.updateTimeFormat();
     if (!this.showSelectionState()) return;
     if (changedRange) for (const card of this.cards.values()) card.resetZoom();
     if (scope || changedRange || changedMetadata) void this.refresh();
@@ -252,7 +255,7 @@ export class ChartWorkspace {
     try {
       const catalog = await this.reads.catalog(this.runs.map(run => run.id), request.signal, fresh);
       if (request.signal.aborted) return;
-      this.catalog = catalog; this.notice.hidden = true;
+      this.catalog = catalog; this.notice.hidden = true; this.updateConnectionNotice(null);
       if (!this.initialized) {
         const saved = this.preferences.selected(this.experimentId);
         if (saved) {this.layout = copyLayout(saved); this.initialized = true;}
@@ -267,7 +270,7 @@ export class ChartWorkspace {
       await this.queryVisible(fresh);
     } catch (error) {
       if (!request.signal.aborted) {
-        if (this.cards.size) this.showNotice(`Updates unavailable. ${errorText(error)}`, () => {void this.refresh(true);});
+        if (this.cards.size) this.updateConnectionNotice(`Updates unavailable. ${errorText(error)}`);
         else this.grid.replaceChildren(message("Could not load panels", errorText(error), button("Try again", () => {void this.refresh(true);})));
       }
     } finally {if (this.catalogRequest === request) this.busy = false;}
@@ -306,7 +309,7 @@ export class ChartWorkspace {
           changed => this.updateRecordConfiguration(changed));
         view.element.dataset.panelId = panel.id; this.cards.set(panel.id, view); this.observer.observe(view.element);
       }
-      if (view instanceof ChartRenderer && panel.kind === "chart") view.applySpec(panel);
+      if (view instanceof ChartRenderer && panel.kind === "chart") {view.setTimeFormat(this.range.timeFormat); view.applySpec(panel);}
       else if (view instanceof SnapshotVisualPanel && isSnapshotVisual(panel)) {
         view.applySpec(panel); if (this.catalog) view.setContext(this.catalog, this.runs, this.range);
       } else if (view instanceof TablePanel && panel.kind !== "chart") {view.applySpec(panel); if (this.catalog) view.setContext(this.catalog, this.runs, this.range);}
@@ -435,8 +438,15 @@ export class ChartWorkspace {
   private timeSettings(): void {
     const modal = this.modal("Time settings");
     renderTimeSettings(modal, this.catalog?.axes ?? ["wall_time", "elapsed"], this.range, range => {
-      if ((["axis", "window", "from", "to"] as const).some(key => range[key] !== this.range[key])) {this.range = range; this.rangeChanged(); this.syncPanels();}
+      if (!sameQueryRange(range, this.range)) {this.range = range; this.rangeChanged(); this.syncPanels();}
+      else if (range.timeFormat !== this.range.timeFormat) {
+        this.range = range; this.rangeUpdated(this.range); this.updateTimeFormat();
+      }
     }, this.catalog ? rangeBounds(this.range, this.catalog) : this.range);
+  }
+  /** Apply shared tick preferences to existing and expanded plots without changing their evidence. */
+  private updateTimeFormat(): void {
+    for (const card of this.cards.values()) if (card instanceof ChartRenderer) card.setTimeFormat(this.range.timeFormat);
   }
   /** Switch from a cached anchored list immediately, refreshing only its rows when safe. */
   private workspaceSets(rename = false): void {
@@ -710,6 +720,7 @@ export class ChartWorkspace {
   }
   /** Release expanded DOM, previews, reads, tables, charts and all viewport observers together. */
   destroy(): void {
+    this.updateConnectionNotice(null);
     this.lifetime.abort(); this.catalogRequest?.abort(); this.queryRequest?.abort(); this.cancelScheduled(); clearInterval(this.timer);
     if (this.savedTimer) clearTimeout(this.savedTimer);
     this.layoutView.destroy(); this.observer.disconnect(); for (const card of this.cards.values()) card.destroy();

@@ -158,6 +158,10 @@ Authentication also applies to local requests when the token is configured.
 Expired sessions can be renewed in place without losing unsaved workspace
 changes. Sign-out offers the existing save/discard guard. Browser preferences
 remain separate from authentication and are retained when signing out.
+Temporary network or session-storage failures are connection errors, not
+session expiry. Recovery verifies the current browser cookie before asking
+for a password, so a cookie renewed in another tab resumes automatically.
+If verification is unavailable, retry it without discarding the workspace.
 
 HTTP authentication does not encrypt traffic. Use a secured tunnel or HTTPS
 reverse proxy on untrusted networks. For HTTPS termination, configure

@@ -15,8 +15,14 @@ export function renderTimeSettings(modal: ReturnType<typeof dialog>, axes: strin
   const fromField = field("From", from), toField = field("To", to);
   const alignment = select("Alignment", axes.map(axis => [axis, axisLabel(axis)]),
     axes.includes(range.axis) ? range.axis : axes[0] ?? "elapsed", () => update(false));
+  const timeFormat = select("X-axis labels", [["auto", "Auto"], ["time", "Time"], ["date", "Date"]],
+    range.timeFormat ?? "auto", () => {error.textContent = "";});
   const update = (initial: boolean): void => {
     const axis = alignment.value, wall = axis === "wall_time", elapsed = axis === "elapsed";
+    timeFormat.disabled = !wall;
+    timeFormat.title = wall ? "Local clock time or calendar dates; Auto adapts to the visible range."
+      : "Choose Observation time alignment to display clock time or calendar dates.";
+    timeFormat.setAttribute("aria-description", timeFormat.title);
     for (const [index, input] of inputs.entries()) {
       input.type = wall ? "datetime-local" : "text";
       input.step = "1"; input.maxLength = 128;
@@ -46,14 +52,20 @@ export function renderTimeSettings(modal: ReturnType<typeof dialog>, axes: strin
     if (start !== undefined && end !== undefined && start > end) {
       error.textContent = "The end must not be before the start."; to.focus(); return;
     }
+    const format = timeFormat.value;
+    if (format !== "auto" && format !== "time" && format !== "date") {
+      error.textContent = "Choose Auto, Time or Date for X-axis labels."; timeFormat.focus(); return;
+    }
     const unchanged = alignment.value === range.axis && inputs.every((input, index) => retainable[index] && input.value === originals[index]);
-    applyRange(unchanged ? {...range} : {axis: alignment.value, window: start !== undefined || end !== undefined ? "custom" : "all",
-      ...(start === undefined ? {} : {from: start}), ...(end === undefined ? {} : {to: end})});
+    const next: RangeState = unchanged ? {...range} : {axis: alignment.value, window: start !== undefined || end !== undefined ? "custom" : "all",
+      ...(start === undefined ? {} : {from: start}), ...(end === undefined ? {} : {to: end})};
+    if (format === "auto") delete next.timeFormat; else next.timeFormat = format;
+    applyRange(next);
     modal.close();
   }, "button primary");
   apply.setAttribute("aria-label", "Apply time settings");
   const alignmentRow = el("div", "time-alignment-row"), boundsRow = el("div", "time-bounds");
-  alignmentRow.append(field("Alignment", alignment), apply); boundsRow.append(fromField, toField);
+  alignmentRow.append(field("Alignment", alignment), field("X-axis labels", timeFormat), apply); boundsRow.append(fromField, toField);
   note.classList.add("sr-only");
   modal.body.append(alignmentRow, note, boundsRow, error);
   update(true);

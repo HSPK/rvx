@@ -250,7 +250,9 @@ async fn stats(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     blocking(move || Ok(serde_json::to_value(state.engine.stats()?)?)).await
 }
 
-async fn ingestion_diagnostics(State(state): State<AppState>) -> Json<rvx_core::IngestionDiagnostics> {
+async fn ingestion_diagnostics(
+    State(state): State<AppState>,
+) -> Json<rvx_core::IngestionDiagnostics> {
     Json(state.engine.ingestion_diagnostics())
 }
 
@@ -446,9 +448,9 @@ async fn snapshot_query(
     State(state): State<AppState>,
     Json(request): Json<SnapshotQueryRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    blocking(move || {
+    table_blocking(move |control| {
         Ok(serde_json::to_value(
-            state.engine.snapshot_query(&request)?,
+            state.engine.snapshot_query_controlled(&request, &control)?,
         )?)
     })
     .await

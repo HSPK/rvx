@@ -38,6 +38,7 @@ test("bootstrap precedes stored layout, failure offers Retry and never writes a 
   await page.route("**/api/ui/workspaces", route => {writes++; return route.fallback();});
   await page.goto("/rvx?runs=run-1");
   await expect(page.locator(".preferences-notice")).toContainText("Settings unavailable");
+  await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "connected");
   await expect(page.locator(".chart-card canvas").first()).toBeVisible();
   await page.getByRole("button", {name: "Save current workspace"}).click();
   await page.getByRole("textbox", {name: "Workspace set name"}).fill("Offline draft");
@@ -201,6 +202,9 @@ test("websocket is green only after a matching pong, then timeout/reconnect refr
   const before = requests.filter(request => request.path === "/api/ui/state").length;
   await page.clock.runFor(5000); await expect.poll(() => pings.length).toBe(2);
   await page.clock.runFor(8001); await expect(dot).toHaveAttribute("data-state", "offline");
+  await expect(dot.locator(".connection-label")).toHaveText("Disconnected");
+  const label = (await dot.locator(".connection-label").boundingBox())!, indicator = (await dot.locator(".connection-dot").boundingBox())!;
+  expect(label.x + label.width).toBeLessThan(indicator.x);
   await page.clock.runFor(1000); await expect.poll(() => sockets.length).toBe(2);
   await expect.poll(() => pings.length).toBe(3);
   const ping = pings.at(-1)!; ping.socket.send(JSON.stringify({type: "pong", id: ping.id}));

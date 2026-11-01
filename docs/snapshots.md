@@ -194,6 +194,22 @@ A chosen column count is a responsive upper bound, not a forced overflow.
 Columns, size, gap, density, and appearance change presentation only, never
 measurements, identity, aggregation, or source provenance.
 
+Workload fields `submitted_at`, `started_at`, and `finished_at` (numeric Unix
+seconds) display as local dates with seconds and a timezone in snapshot tables
+and task readouts. `runtime_seconds` displays as a duration, for example
+`1h 2m 3s`. This applies to matching field names, including nested paths.
+Null, missing, truncated, and invalid values keep their original representation.
+Raw values remain available in table/detail tooltips; sorting, filtering, CSV
+exports, and stored snapshots retain the original numbers.
+
+Hovering a status cell adds a subtle outline without changing its state color
+or numeric shading. Grid insets leave space for the outline at both edges.
+Hover readouts clear when leaving a task, including cell gaps and unused space
+after the final task; keyboard readouts follow the focused task.
+Overflowing grids, bars, and tables scroll internally; at
+either boundary (or when all content fits), wheel scrolling continues in the
+containing workspace.
+
 With `shadePath`, the records projection includes that field, and the same
 pinned state-count aggregate also requests its `min` and `max`. Min measures
 include `minimum_magnitude`, an exact `TableCell` containing the smallest nonzero
@@ -568,11 +584,20 @@ an earlier numeric point to preserve a gap and the latest observation.
 Reads accept at most 64 Runs, 64 paths, and 256 Source IDs. Each projection
 scans indexed data for at most 100,000 snapshots / 256 MiB, retains at most one million
 projection cells, and returns at most 100,000 total points / 16 MiB.
-`max_points` is 1..10,000 per series. Exceeding a budget returns an explicit
-error requesting narrower filters, not silently truncated history. Wall-time
-and elapsed bounds narrow the observation-index scan. Logical axis bounds do
-not; narrow Source/Run selection for those queries. Latest/history pages accept
-at most 256 records.
+`max_points` is 1..10,000 per series. Long chart histories, including All time,
+are split into bounded, nonoverlapping observation windows when a scan budget
+is reached. Actual observations are sampled within those windows and merged
+under the original per-series point limit, retaining missing-value gaps, exact
+snapshot IDs and the latest observation. This does not narrow the requested
+history or turn chart samples into authoritative summary statistics.
+One chart request permits at most 64 window reads, a 256 MiB / 200,000-point
+intermediate working set, and a shared 30-second cooperative deadline with
+request-local cancellation. Unsplit ranges, incomplete field indexes and output
+budget violations remain explicit errors rather than partial successes.
+Wall-time, elapsed and explicit logical-axis bounds filter observations before
+their scan budget is applied. Exact metric summaries retain their single-scan
+limits and never derive statistics from sampled chart windows.
+Latest/history pages accept at most 256 records.
 
 ### `/api/snapshots/diff`
 

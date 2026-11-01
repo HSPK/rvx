@@ -23,7 +23,7 @@
 .sv-trace-legend {display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; overflow-wrap: anywhere;}
 .sv-trace-swatch {display: inline-block; width: 9px; height: 9px; flex: none; border-radius: 2px; background: var(--sv-color);}
 .sv-trace-swatch.sv-pattern {background: repeating-linear-gradient(135deg, transparent 0 2px, #ffffff80 2px 3px), var(--sv-color);}
-.sv-bar-viewport {max-height: 390px; min-height: 90px; overflow: auto; overscroll-behavior: contain; min-width: 0; padding-right: 4px;}
+.sv-bar-viewport {max-height: 390px; min-height: 90px; overflow: auto; overscroll-behavior: auto; min-width: 0; padding-right: 4px;}
 .sv-bar-chart {display: flex; flex-direction: column; min-width: 0; gap: 14px; padding: 2px 0 8px;}
 .sv-bar-category {min-width: 0;}
 .sv-category-label {font-size: 12px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; margin-bottom: 4px;}
@@ -63,22 +63,19 @@
 .sv-state-swatch {position: relative; width: 12px; height: 12px; background: var(--sv-state); border-radius: 2px; flex: none;}
 .sv-state-key[data-kind="missing"] .sv-state-swatch {background: transparent; border: 1px dashed var(--sv-state);}
 .sv-state-key[data-kind="null"] .sv-state-swatch::after {content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--surface);}
-.sv-status-viewport {height: var(--sv-content-height, 320px); max-height: 360px; min-height: 100px; min-width: 0; overflow: auto; position: relative; overscroll-behavior: contain; touch-action: pan-y; contain: layout paint;}
+.sv-status-viewport {height: var(--sv-content-height, 320px); max-height: 360px; min-height: 100px; min-width: 0; overflow: auto; position: relative; overscroll-behavior: auto; touch-action: pan-y; contain: layout paint;}
 .sv-status-canvas {position: relative; width: 100%; min-width: 0;}
-.sv-task-group {position: absolute; left: 0; right: 0; margin: 0; height: 30px; display: flex; align-items: center; gap: 6px; padding-right: 4px; font-size: 11px; font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+.sv-task-group {position: absolute; left: 4px; right: 4px; margin: 0; height: 30px; display: flex; align-items: center; gap: 6px; padding-right: 4px; font-size: 11px; font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
 .sv-task-group::before {content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--run-color);}
-.sv-task-cell {position: absolute; inset: 0 auto auto 0; display: block; margin: 0; padding: 0; border: 0; border-radius: 2px; background: color-mix(in srgb, var(--sv-state) var(--sv-shade, 92%), var(--surface)); box-shadow: none; touch-action: pan-y; transition: filter 100ms ease;}
+.sv-task-cell {position: absolute; inset: 0 auto auto 0; display: block; margin: 0; padding: 0; border: 0; border-radius: 2px; background: color-mix(in srgb, var(--sv-state) var(--sv-shade, 92%), var(--surface)); box-shadow: none; touch-action: pan-y;}
 .sv-task-cell:focus-visible {outline: 2px solid var(--surface); outline-offset: -2px; z-index: 1;}
 .sv-task-cell[data-kind="missing"] {background: transparent; border: 1px dashed color-mix(in srgb, var(--sv-state) var(--sv-shade, 70%), var(--surface));}
 .sv-task-cell[data-kind="null"]::before {content: ""; position: absolute; inset: 36%; border-radius: 50%; background: var(--surface);}
 .sv-task-cell[data-shade="unavailable"]::after {content: ""; position: absolute; right: 2px; bottom: 2px; width: 3px; height: 3px; border-radius: 50%; background: var(--surface); border: 1px solid var(--muted);}
 @media (hover: hover) {
-  .sv-task-cell:hover {filter: brightness(1.16);}
+  .sv-task-cell:hover:not(:focus-visible) {outline: 1px solid color-mix(in srgb, var(--text) 35%, transparent); outline-offset: 1px;}
 }
-@media (prefers-reduced-motion: reduce) {
-  .sv-task-cell {transition: none;}
-}
-.sv-tooltip {position: fixed; inset: auto; margin: 0; padding: 10px 12px; border: 0; border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: var(--shadow), 0 0 0 1px var(--line); font-size: 12px; line-height: 1.45; pointer-events: none; overflow: auto; overflow-wrap: anywhere;}
+.sv-tooltip {position: fixed; inset: auto; margin: 0; width: max-content; padding: 10px 12px; border: 0; border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: var(--shadow), 0 0 0 1px var(--line); font-size: 12px; line-height: 1.45; pointer-events: none; overflow: auto; overflow-wrap: anywhere;}
 .sv-tooltip-title {display: block; margin-bottom: 6px;}
 .sv-readout {display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; min-width: 0;}
 .sv-readout dt {color: var(--muted); max-width: 130px; overflow-wrap: anywhere;}
