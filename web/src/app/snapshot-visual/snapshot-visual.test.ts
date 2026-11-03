@@ -114,6 +114,14 @@ describe("stable task state matrices", () => {
 });
 
 describe("snapshot visual query ownership", () => {
+  it("uses the same selected groups for native task, aggregate and table query semantics", () => {
+    const query = {filterGroups: [{id: "status", name: "Status", path: "/status", display: "radio" as const,
+      options: [{label: "Running", value: "Running"}], selected: "Running"}]};
+    expect(nativeFilters({...spec, query})).toEqual([{path: "/status", op: "eq", value: "Running"}]);
+    expect(visualQueryKey({...spec, query})).not.toBe(visualQueryKey(spec));
+    expect(visualQueryKey({...spec, query: {...query, filterGroups: query.filterGroups.map(group => ({...group, name: "State", display: "select"}))}}))
+      .toBe(visualQueryKey({...spec, query}));
+  });
   it("retains disabled configuration but strips disabled conditions and enabled flags on the wire", () => {
     const query = {filters: [{path: "/status", op: "eq" as const, value: "Running", enabled: true}, {path: "/id", op: "eq" as const, value: "x", enabled: false}]};
     expect(nativeFilters({...spec, query})).toEqual([{path: "/status", op: "eq", value: "Running"}]);

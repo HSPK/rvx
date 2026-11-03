@@ -5,7 +5,7 @@ import type {ExperimentRun} from "../domain/types";
 import type {MetricCatalogQueryCoordinator} from "./coordinator";
 import {formatTime, observedTime, humanize, metricName, rangeBounds, sameQueryRange, type RangeState} from "./model";
 import {PanelChrome, type PanelAction} from "./panel-chrome";
-import {copyPanel, type ColumnPreference, type TablePanelSpec} from "./panels";
+import {activeTableFilters, copyFilterGroups, copyPanel, type ColumnPreference, type TablePanelSpec} from "./panels";
 import {collectionLabel, filterSummaryRows, TableView, type ViewColumn, type ViewRow} from "./table-view";
 import {button, el, errorText} from "./ui";
 
@@ -44,6 +44,7 @@ export class TablePanel {
     this.chrome = new PanelChrome("table", action, mode === "preview");
     this.view = new TableView(() => {
       this.spec.query = {search: this.view.state.search, filters: this.view.state.filters.map(filter => ({...filter})),
+        ...(this.view.state.filterGroups?.length ? {filterGroups: copyFilterGroups(this.view.state.filterGroups)} : {}),
         ...(this.view.state.sort ? {sort: {...this.view.state.sort}} : {})};
       this.configurationChanged(this.spec);
       if (this.spec.kind === "metric-table" && this.summaryLoaded) this.renderSummary(); else void this.load(true);
@@ -78,7 +79,8 @@ export class TablePanel {
     const beforeScope = this.spec.kind === "snapshot-table" ? this.spec.path : this.spec.paths;
     const afterScope = spec.kind === "snapshot-table" ? spec.path : spec.paths;
     const changed = JSON.stringify([this.spec.kind, beforeScope, this.spec.sourceIds]) !== JSON.stringify([spec.kind, afterScope, spec.sourceIds]);
-    const queryChanged = JSON.stringify({search: this.view.state.search, filters: this.view.state.filters, sort: this.view.state.sort}) !== JSON.stringify({search: spec.query?.search ?? "", filters: spec.query?.filters ?? [], sort: spec.query?.sort});
+    const queryChanged = JSON.stringify([this.view.state.search, this.view.state.filters, this.view.state.filterGroups ?? [], this.view.state.sort])
+      !== JSON.stringify([spec.query?.search ?? "", spec.query?.filters ?? [], spec.query?.filterGroups ?? [], spec.query?.sort]);
     const copy = copyPanel(spec);
     if (copy.kind === "chart") return;
     Object.assign(this.spec, copy);
@@ -164,8 +166,7 @@ export class TablePanel {
         const preferences = this.columnPreferences(columns);
         const selected = this.definition.columns.filter(column => column.path === "$key" || !preferences.find(pref => pref.id === column.path)?.hidden).map(column => column.path);
         // Let native validation report removed fields instead of silently reading unfiltered rows.
-        const filters = this.view.state.filters.filter(filter => filter.enabled !== false)
-          .map(({path, op, value}) => ({path, op, value}));
+        const filters = activeTableFilters(this.view.state);
         const sort = this.view.state.sort;
         const query = {
           run_ids: context.runs.map(run => run.id), path: this.spec.path, columns: [...new Set([...selected, ...filters.map(filter => filter.path), ...(sort ? [sort.path] : [])])],

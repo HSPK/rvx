@@ -129,6 +129,29 @@ async function visualFixture(page: Page, view: SnapshotView, overrides: Partial<
     releaseCounts: () => {gate = null; release();}};
 }
 
+test("snapshot visual toolbar groups share AND filters between records and full status counts", async ({page}) => {
+  const fixture = await visualFixture(page, statusView, {query: {filterGroups: [
+    {id: "status", name: "Status", path: "/status", display: "radio", options: [{label: "Running", value: "Running"}]},
+    {id: "queue", name: "Queue", path: "/queue", display: "select", options: [{label: "Primary", value: "Primary queue"}]},
+  ]}});
+  fixture.state.total = 6;
+  await page.goto("/rvx?runs=run-1&live=0");
+  const card = page.locator(".snapshot-visual-card");
+  await expect(card).toHaveAttribute("data-loaded", "true");
+  await card.getByRole("radio", {name: "Running", exact: true}).check();
+  await expect.poll(() => fixture.calls.aggregate.at(-1)?.filters).toEqual([{path: "/status", op: "eq", value: "Running"}]);
+  await card.getByRole("combobox", {name: "Queue", exact: true}).selectOption("Primary queue");
+  const expected = [{path: "/status", op: "eq", value: "Running"}, {path: "/queue", op: "eq", value: "Primary queue"}];
+  await expect.poll(() => fixture.calls.aggregate.at(-1)?.filters).toEqual(expected);
+  expect(fixture.calls.records.at(-1)?.filters).toEqual(expected);
+  await page.getByRole("button", {name: "Save current workspace", exact: true}).click();
+  await expect(page.locator(".workspace-save-slot")).toHaveText("Saved");
+  await page.reload(); await expect(card).toHaveAttribute("data-loaded", "true");
+  await expect(card.getByRole("radio", {name: "Running", exact: true})).toBeChecked();
+  await card.getByRole("radio", {name: "All", exact: true}).check();
+  await expect.poll(() => fixture.calls.aggregate.at(-1)?.filters).toEqual([{path: "/queue", op: "eq", value: "Primary queue"}]);
+});
+
 test("status hover preserves state colors and workload times are readable in hover and details", async ({page}) => {
   await page.emulateMedia({reducedMotion: "reduce"});
   const fixture = await visualFixture(page, {...statusView, valuePath: "/runtime_seconds"});

@@ -5,7 +5,8 @@ import type {ExperimentRun} from "../../domain/types";
 import type {MetricCatalogQueryCoordinator} from "../coordinator";
 import type {RangeState} from "../model";
 import {PanelChrome, type PanelAction} from "../panel-chrome";
-import {copyPanel, isSnapshotVisual, type SnapshotVisualPanelSpec} from "../panels";
+import {activeTableFilters, copyFilterGroups, copyPanel, isSnapshotVisual, type SnapshotVisualPanelSpec} from "../panels";
+import {FilterGroupToolbar} from "../filter-groups";
 import {openTableFilters} from "../table-filters";
 import {collectionLabel} from "../table-view";
 import {statusDisplayControls} from "../status-display-controls";
@@ -17,7 +18,7 @@ import "./styles.css";
 
 /** Strip UI-only disabled flags from every native visual query without discarding saved rules. */
 export function nativeFilters(spec: SnapshotVisualPanelSpec): TableFilter[] {
-  return (spec.query?.filters ?? []).filter(filter => filter.enabled !== false).map(({path, op, value}) => ({path, op, value}));
+  return activeTableFilters(spec.query);
 }
 
 /** Ignore retained Table sorting and local presentation choices when identifying native visual queries. */
@@ -36,6 +37,7 @@ export class SnapshotVisualPanel {
   private tools = el("div", "sv-tools");
   private search = el("input", "text-input sv-search");
   private filters: HTMLButtonElement;
+  private filterGroups: FilterGroupToolbar;
   private arrange: HTMLButtonElement;
   private feedback = el("div", "sv-feedback muted");
   private footer = el("footer", "sv-footer");
@@ -78,9 +80,17 @@ export class SnapshotVisualPanel {
       this.debounce = setTimeout(() => {this.debounce = null; this.changeQuery({...(this.spec.query ?? {}), search: this.search.value});}, 180);
     }, {signal: this.lifetime.signal});
     this.filters = button("Filter", () => this.openFilters(), "button quiet");
+    this.filterGroups = new FilterGroupToolbar((id, selected) => {
+      const filterGroups = copyFilterGroups(this.spec.query?.filterGroups).map(group => {
+        if (group.id === id) {if (selected === undefined) delete group.selected; else group.selected = selected;}
+        return group;
+      });
+      this.changeQuery({...this.spec.query, filterGroups});
+    });
     this.arrange = button("Arrange", () => this.openArrangement(), "button quiet");
     this.arrange.setAttribute("aria-haspopup", "dialog"); this.arrange.setAttribute("aria-expanded", "false");
-    this.tools.append(this.search, this.filters, this.arrange);
+    const actions = el("div", "table-actions"); actions.append(this.filters, this.arrange);
+    this.tools.append(this.search, this.filterGroups.element, actions);
     this.previous = iconButton("Previous task page", "left", () => this.page(-1));
     this.next = iconButton("Next task page", "right", () => this.page(1));
     this.footer.append(this.summary, this.coverage, this.previous, this.next);
@@ -113,7 +123,8 @@ export class SnapshotVisualPanel {
     this.element.classList.toggle("wide", this.spec.size === "wide");
     if (this.search.value !== (this.spec.query?.search ?? "")) this.search.value = this.spec.query?.search ?? "";
     const count = nativeFilters(this.spec).length;
-    this.filters.querySelector("span")!.textContent = count ? `Filter · ${count}` : "Filter";
+    this.filters.querySelector("span")!.textContent = count ? `Filter (${count})` : "Filter";
+    this.filterGroups.sync(this.spec.query?.filterGroups);
     if (view.type === "bar" && !(this.visual instanceof SnapshotBars)) {
       this.visual?.destroy(); this.visual = new SnapshotBars(this.names, this.tooltip); this.body.replaceChildren(this.visual.element);
     } else if (view.type === "status-grid" && !(this.visual instanceof SnapshotStatusGrid)) {
@@ -297,9 +308,7 @@ export class SnapshotVisualPanel {
   private openFilters(): void {
     this.tooltip.hide(); this.arrangeDialog?.close(); this.filterDialog?.close();
     const columns = this.definition?.columns.map(column => ({id: column.path, label: column.name})) ?? [];
-    this.filterDialog = openTableFilters(columns, this.spec.query?.filters ?? [], filters => {
-      this.changeQuery({...this.spec.query, filters});
-    }, () => {this.filterDialog = null;});
+    this.filterDialog = openTableFilters(columns, this.spec.query ?? {}, query => this.changeQuery(query), () => {this.filterDialog = null;});
   }
 
   /** Adjust native task ordering or cached geometry beside the live panel without opening the full editor. */

@@ -71,8 +71,9 @@ export class RunDetails {
     if (this.current && context === this.context && (["name", "status", "config_json", "created_at_ns", "updated_at_ns"] as const).every(key => this.current![key] === run[key])) return;
     this.current = run; this.context = context;
     const scroll = this.modal.body.scrollTop;
+    const heading = this.modal.node.querySelector<HTMLHeadingElement>(".dialog-header h2")!;
+    heading.textContent = label; heading.classList.add("run-detail-name");
     const summary = el("section", "run-detail-summary");
-    summary.append(el("h3", "run-detail-name", label));
     const status = el("p", "run-detail-status");
     status.append(el("i", `run-status status-${run.status}`), el("span", "", humanize(run.status)));
     const color = button("Color", this.chooseColor, "button quiet run-color-detail");
@@ -88,9 +89,9 @@ export class RunDetails {
     ]) {
       const row = el("div"); row.append(el("dt", "", label), el("dd", label === "Run ID" ? "run-detail-id" : "", value)); fields.append(row);
     }
-    const configuration = el("section", "run-configuration"), heading = el("header", "run-config-heading");
-    heading.append(el("h3", "", "Configuration"), button("Download JSON", () => this.download(), "text-button"));
-    configuration.append(heading);
+    const configuration = el("section", "run-configuration"), configHeading = el("header", "run-config-heading");
+    configHeading.append(el("h3", "", "Configuration"), button("Download JSON", () => this.download(), "text-button"));
+    configuration.append(configHeading);
     const preview = configurationPreview(run.config_json);
     if (preview.notice) {
       const note = el("p", "run-config-notice muted", preview.notice); note.setAttribute("role", "status"); configuration.append(note);

@@ -17,7 +17,6 @@ export class SignInForm {
   constructor(private completed: (status: SessionStatus) => void, recovery = false) {
     this.form.method = "post"; this.form.action = "/api/auth/login";
     const brand = brandMark(), heading = el("h1", "auth-title", recovery ? "Session expired" : "Sign in");
-    const hint = el("p", "auth-description", recovery ? "Sign in again to continue. Your changes are still here." : "Use your server access password.");
     const label = el("label", "auth-label", "Password"), field = el("div", "auth-password");
     this.password.type = "password"; this.password.name = "password"; this.password.id = "rvx-sign-in-password";
     this.password.autocomplete = "current-password"; this.password.required = true; this.password.maxLength = 256;
@@ -44,7 +43,9 @@ export class SignInForm {
       this.password.removeAttribute("aria-invalid");
       if (!this.retryTimer) this.error.hidden = true;
     });
-    this.element.append(brand, heading, hint, this.form);
+    this.element.append(brand, heading);
+    if (recovery) this.element.append(el("p", "auth-description", "Your unsaved changes are preserved."));
+    this.element.append(this.form);
   }
 
   /** Focus credentials only after the form is attached or its modal is shown. */

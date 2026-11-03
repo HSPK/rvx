@@ -104,6 +104,7 @@ export class TaskDetails {
       if (this.request === request) {this.request = null; this.modal = null;}
     });
     this.modal = modal;
+    modal.node.querySelector(".dialog-header h2")!.textContent = title;
     const metadata = el("dl", "sv-readout sv-task-provenance");
     for (const [label, value] of provenance(record.run_id, record.source_id, snapshot, this.names)) {
       metadata.append(el("dt", "", label), el("dd", "", label === "Observed" ? formatTime(snapshot?.observed_at_ns) : value));
@@ -112,7 +113,7 @@ export class TaskDetails {
       el("dt", "", "Snapshot"), el("dd", "", record.snapshot_id));
     const fields = el("dl", "sv-task-fields"), state = el("span", "muted sv-detail-state", "Loading remaining fields…");
     state.setAttribute("role", "status");
-    modal.body.append(el("h3", "sv-task-title", title), metadata, fields, state);
+    modal.body.append(metadata, fields, state);
     this.paint(fields, record.cells);
     void this.load(path, record, fields, state, request);
   }

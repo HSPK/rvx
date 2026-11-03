@@ -1,13 +1,14 @@
 import type {TableCell, TableDefinition} from "../domain/tables";
-import type {ColumnPreference, TableFilterPreference, TableQueryPreference} from "./panels";
-import {button, dialog, el, field, iconButton, select} from "./ui";
+import {activeTableFilters, copyFilterGroups, type ColumnPreference, type TableFilterGroup, type TableFilterPreference, type TableQueryPreference} from "./panels";
+import {button, dialog, el, iconButton, select} from "./ui";
 import {decimalDisplay} from "./decimal-display";
 import {temporalCellText} from "./time";
 import {openTableFilters} from "./table-filters";
+import {FilterGroupToolbar} from "./filter-groups";
 
 export interface ViewColumn {id: string; label: string; numeric?: boolean; sortable?: boolean; filterable?: boolean; width?: number}
 export interface ViewRow {key: string; cells: Record<string, TableCell>; snapshotId: string | null; title: string; cellTitles?: Record<string, string>}
-export interface TableViewState {search: string; filters: TableFilterPreference[]; sort?: {path: string; direction: "asc" | "desc"}; offset: number; limit: number}
+export interface TableViewState {search: string; filters: TableFilterPreference[]; filterGroups?: TableFilterGroup[]; sort?: {path: string; direction: "asc" | "desc"}; offset: number; limit: number}
 export const tablePageSize = 75;
 export const missingCell: TableCell = {kind: "missing", text: "missing", truncated: false};
 const naturalOrder = new Intl.Collator(undefined, {numeric: true});
@@ -42,7 +43,7 @@ export function compareCells(a: TableCell, b: TableCell): number {
 /** Filter already-authoritative summary rows; no statistics are calculated from projected samples. */
 export function filterSummaryRows(rows: ViewRow[], state: TableViewState): ViewRow[] {
   const query = state.search.toLocaleLowerCase();
-  const filters = state.filters.filter(filter => filter.enabled !== false).map(filter => ({
+  const filters = activeTableFilters(state).map(filter => ({
     ...filter, folded: filter.value.toLocaleLowerCase(), numeric: Number.isFinite(Number(filter.value)),
     operand: cellKey({kind: "number", text: filter.value, truncated: false}),
   }));
@@ -83,6 +84,7 @@ export class TableView {
   private colgroup = el("colgroup");
   private search = el("input", "text-input table-search");
   private filtersButton: HTMLButtonElement;
+  private filterGroups: FilterGroupToolbar;
   private count = el("span", "muted");
   private previous: HTMLButtonElement;
   private next: HTMLButtonElement;
@@ -110,8 +112,17 @@ export class TableView {
       this.debounce = setTimeout(() => {this.state.search = this.search.value; this.state.offset = 0; this.changed();}, 180);
     });
     this.filtersButton = button("Filter", () => this.filterDialog(), "button quiet");
-    tools.append(this.search, this.filtersButton, button("Columns", () => this.columnDialog(), "button quiet"),
+    this.filterGroups = new FilterGroupToolbar((id, selected) => {
+      this.state.filterGroups = copyFilterGroups(this.state.filterGroups).map(group => {
+        if (group.id === id) {if (selected === undefined) delete group.selected; else group.selected = selected;}
+        return group;
+      });
+      this.state.offset = 0; this.changed();
+    });
+    const actions = el("div", "table-actions");
+    actions.append(this.filtersButton, button("Columns", () => this.columnDialog(), "button quiet"),
       iconButton("Export page CSV", "download", () => this.exportPage()));
+    tools.append(this.search, this.filterGroups.element, actions);
     this.table.append(this.colgroup, this.head, this.body);
     this.viewport.tabIndex = 0; this.viewport.setAttribute("role", "region"); this.viewport.setAttribute("aria-label", "Table rows");
     this.viewport.append(this.table);
@@ -149,6 +160,8 @@ export class TableView {
   setQuery(query?: TableQueryPreference): void {
     this.state.search = query?.search ?? ""; this.search.value = this.state.search;
     this.state.filters = query?.filters?.map(filter => ({...filter})) ?? [];
+    this.state.filterGroups = copyFilterGroups(query?.filterGroups);
+    this.filterGroups.sync(this.state.filterGroups);
     if (query?.sort) this.state.sort = {...query.sort}; else delete this.state.sort;
     this.state.offset = 0;
   }
@@ -242,7 +255,8 @@ export class TableView {
     if (!this.rows.length) {const tr = el("tr"), cell = el("td", "table-empty", "No matching rows"); cell.colSpan = this.displayed.length; tr.append(cell); this.body.append(tr);}
     const count = this.total ? `${this.state.offset + 1}–${Math.min(this.total, this.state.offset + this.rows.length)} of ${this.total.toLocaleString()}` : "0 rows";
     if (this.count.textContent !== count) this.count.textContent = count;
-    const enabled = this.state.filters.filter(filter => filter.enabled !== false).length;
+    this.filterGroups.sync(this.state.filterGroups);
+    const enabled = activeTableFilters(this.state).length;
     const filterLabel = this.filtersButton.querySelector("span")!, filterText = enabled ? `Filter (${enabled})` : "Filter";
     if (filterLabel.textContent !== filterText) filterLabel.textContent = filterText;
     this.setBusy(false);
@@ -267,27 +281,99 @@ export class TableView {
   /** Let users choose, order and size columns without an unbounded hidden table DOM. */
   private columnDialog(): void {
     this.modal?.close();
-    const modal = dialog("Columns", "table-columns-dialog", () => {this.modal = null;}); this.modal = modal;
+    let cleanup = (): void => {};
+    const modal = dialog("Columns", "table-columns-dialog", () => {cleanup(); this.modal = null;}); this.modal = modal;
     const key = this.columns[0];
     const ordered = [...(key ? [key] : []), ...this.preferences.flatMap(pref => this.columns.filter(column => column.id === pref.id && column.id !== key?.id)), ...this.columns.filter(column => column.id !== key?.id && !this.preferences.some(pref => pref.id === column.id))];
+    const list = el("div", "column-order-list"), announcement = el("p", "sr-only");
+    announcement.setAttribute("role", "status");
+    const headings = el("div", "column-order-headings");
+    headings.setAttribute("aria-hidden", "true");
+    headings.append(el("span", "", "Column"), el("span", "", "Decimals"));
+    headings.lastElementChild!.toggleAttribute("hidden", !this.columns.some(column => column.numeric
+      || this.rows.some(row => row.cells[column.id]?.kind === "number")
+      || this.preferences.some(preference => preference.id === column.id && preference.decimals !== undefined)));
+    modal.body.append(announcement, headings, list);
+    let drag: {from: number; to: number | null; x: number; y: number; startX: number; startY: number; active: boolean} | null = null;
+    let frame = 0;
+    const reset = (): void => {
+      drag = null; cancelAnimationFrame(frame); frame = 0;
+      for (const row of list.children) row.classList.remove("column-dragging", "column-drop-before", "column-drop-after");
+    };
+    cleanup = reset;
+    const move = (from: number, to: number): void => {
+      if (from === 0 || from === to || to < 1 || to >= ordered.length) return;
+      const column = ordered.splice(from, 1)[0]!;
+      ordered.splice(to, 0, column);
+      this.preferences = ordered.map(column => ({id: column.id, ...this.preferences.find(pref => pref.id === column.id)}));
+      this.setData(this.columns, this.rows, this.total, this.preferences);
+      this.columnsChanged(this.preferences.map(pref => ({...pref})), false); render();
+      announcement.textContent = `${column.label} column moved to position ${to + 1}.`;
+      list.querySelector<HTMLButtonElement>(`[data-column-index="${to}"] .column-drag-handle`)?.focus({preventScroll: true});
+    };
+    const target = (): void => {
+      if (!drag) return;
+      for (const row of list.children) row.classList.remove("column-drop-before", "column-drop-after");
+      drag.to = null;
+      const boundary = list.getBoundingClientRect();
+      if (drag.x < boundary.left || drag.x > boundary.right || drag.y < boundary.top || drag.y > boundary.bottom) return;
+      const rows = [...list.children] as HTMLElement[];
+      const index = rows.findIndex(row => {const box = row.getBoundingClientRect(); return drag!.y >= box.top && drag!.y <= box.bottom;});
+      if (index <= 0) return;
+      const box = rows[index]!.getBoundingClientRect(), after = drag.y > box.top + box.height / 2;
+      const insertion = index + Number(after);
+      drag.to = insertion > drag.from ? insertion - 1 : insertion;
+      if (drag.to !== drag.from) rows[index]!.classList.add(after ? "column-drop-after" : "column-drop-before");
+    };
+    const autoscroll = (): void => {
+      if (!drag?.active) return;
+      const box = list.getBoundingClientRect();
+      if (drag.x >= box.left && drag.x <= box.right && drag.y >= box.top && drag.y <= box.bottom) {
+        list.scrollTop += drag.y < box.top + 32 ? -10 : drag.y > box.bottom - 32 ? 10 : 0;
+        target();
+      }
+      frame = requestAnimationFrame(autoscroll);
+    };
     const render = (): void => {
-      modal.body.replaceChildren(...ordered.map((column, index) => {
+      list.replaceChildren(...ordered.map((column, index) => {
         const row = el("div", "column-option"), label = el("label");
+        row.dataset.columnIndex = String(index);
         const check = el("input"); check.type = "checkbox"; check.checked = !this.preferences.find(pref => pref.id === column.id)?.hidden;
         check.disabled = index === 0; check.setAttribute("aria-label", `Show ${column.label}`);
         check.addEventListener("change", () => this.changeColumn(column.id, {hidden: !check.checked}));
         label.append(check, el("span", "", column.label));
-        const reorder = (delta: number): void => {
-          const to = index + delta; if (to < 0 || to >= ordered.length) return;
-          [ordered[index], ordered[to]] = [ordered[to]!, ordered[index]!];
-          this.preferences = ordered.map(column => ({id: column.id, ...this.preferences.find(pref => pref.id === column.id)}));
-          this.setData(this.columns, this.rows, this.total, this.preferences);
-          this.columnsChanged(this.preferences.map(pref => ({...pref})), false); render();
-        };
-        const before = iconButton(`Move ${column.label} column left`, "left", () => reorder(-1));
-        const after = iconButton(`Move ${column.label} column right`, "right", () => reorder(1));
-        before.disabled = index <= 1; after.disabled = index === 0 || index === ordered.length - 1;
-        row.append(label);
+        const handle = iconButton(`Reorder ${column.label} column`, "grip", () => {});
+        handle.classList.add("column-drag-handle"); handle.disabled = index === 0;
+        handle.title = index === 0 ? "The first column stays pinned" : "Drag to reorder, or use Up/Down";
+        handle.setAttribute("aria-description", handle.title);
+        handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown Home End");
+        handle.addEventListener("pointerdown", event => {
+          if (event.button !== 0 || index === 0) return;
+          event.preventDefault(); handle.focus({preventScroll: true});
+          drag = {from: index, to: null, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, active: false};
+          handle.setPointerCapture(event.pointerId);
+        });
+        handle.addEventListener("pointermove", event => {
+          if (!drag || drag.from !== index) return;
+          drag.x = event.clientX; drag.y = event.clientY;
+          if (!drag.active && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 5) return;
+          drag.active = true; row.classList.add("column-dragging"); target();
+          if (!frame) frame = requestAnimationFrame(autoscroll);
+        });
+        handle.addEventListener("pointerup", event => {
+          const current = drag; reset();
+          if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+          if (current?.active && current.to !== null) move(current.from, current.to);
+        });
+        handle.addEventListener("pointercancel", reset); handle.addEventListener("lostpointercapture", reset);
+        handle.addEventListener("keydown", event => {
+          if (event.key === "Escape" && drag) {event.preventDefault(); event.stopPropagation(); reset(); return;}
+          if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+            event.preventDefault(); reset();
+            move(index, event.key === "Home" ? 1 : event.key === "End" ? ordered.length - 1 : index + (event.key === "ArrowUp" ? -1 : 1));
+          }
+        });
+        row.append(handle, label);
         if (column.numeric || this.rows.some(row => row.cells[column.id]?.kind === "number")
           || this.preferences.some(preference => preference.id === column.id && preference.decimals !== undefined)) {
           const decimals = select(`Decimal places for ${column.label}`,
@@ -295,10 +381,9 @@ export class TableView {
             String(this.preferences.find(preference => preference.id === column.id)?.decimals ?? ""),
             value => this.changeColumn(column.id, value === "" ? {} : {decimals: Number(value)}, value === ""));
           decimals.classList.add("column-decimals");
-          const setting = field("Decimals", decimals); setting.classList.add("column-precision");
-          row.append(setting);
+          row.append(decimals);
         }
-        row.append(before, after); return row;
+        return row;
       }));
     };
     render();
@@ -306,8 +391,8 @@ export class TableView {
   /** Send explicit typed column filters to the owner before its pagination step. */
   private filterDialog(): void {
     this.modal?.close();
-    this.modal = openTableFilters(this.columns, this.state.filters, filters => {
-      this.state.filters = filters; this.state.offset = 0; this.changed();
+    this.modal = openTableFilters(this.columns, this.state, query => {
+      this.setQuery(query); this.changed();
     }, () => {this.modal = null;});
   }
   /** Export only the visible page and explicitly preserve bounded-preview markers. */

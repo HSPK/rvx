@@ -516,7 +516,7 @@ export class ChartRenderer {
       const color = (name: string): string => getComputedStyle(this.element).getPropertyValue(name).trim();
       this.host.replaceChildren();
       this.plot = new uPlot({
-        width: Math.max(180, this.host.clientWidth), height: this.height(),
+        width: this.host.clientWidth || 180, height: this.height(),
         padding: [8, () => this.axisRightPadding, 0, 0],
         legend: {show: false},
         cursor: {drag: {x: true, y: false, dist: 6}, points: {size: 6}},
@@ -623,7 +623,7 @@ export class ChartRenderer {
   /** Reconcile explicit size actions immediately and skip redundant observer redraws. */
   private resizePlot(): void {
     if (!this.plot || this.host.hidden || this.host.clientWidth === 0) return;
-    const width = Math.max(180, this.host.clientWidth), height = this.height();
+    const width = this.host.clientWidth, height = this.height();
     if (this.plot.width !== width || this.plot.height !== height) {
       const resume = this.hover.visible ? this.hoverMode : null;
       this.hideHover(); this.plot.setSize({width, height}); this.restoreHover(resume);

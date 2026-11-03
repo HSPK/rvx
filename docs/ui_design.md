@@ -211,11 +211,11 @@ authenticated WebSocket heartbeat. Green means a matching pong was received;
 connecting/reconnecting/offline states are distinct. Hover or keyboard focus
 shows the measured WebSocket round-trip latency. Do not label an HTTP timing
 or local wall-clock difference as WebSocket latency.
-Disconnected/reconnecting text and compact update/settings failure notices sit
-immediately to the left of that dot, never in a banner above the layout.
-Full error details remain available on hover and to assistive technology, with
-quiet retry/dismiss controls; failures do not move the panels or discard their
-last successful observations.
+Disconnected/reconnecting text stays next to that dot. Workspace updates,
+settings failures and other recoverable notifications use a fixed bottom-right
+floating region outside the analysis layout, with readable message text and
+keyboard-accessible retry/dismiss controls. Notifications wrap within narrow
+viewports, never move the panels, and never replace the last successful frame.
 
 Layout edits include panel settings, additions/removal, section state/order,
 and table search/filter/column configuration. Hover, incoming observations,
@@ -430,9 +430,25 @@ around a whole chart or scrolling workspace. On small screens,
 preview, settings, and the primary action must remain reachable without
 stacking an entire desktop toolbox above the chart.
 
+Let layout and control grouping explain the interface rather than adding
+instructional subtitles. Keep essential field names, data provenance, errors
+and recovery actions. Show shared column headings once instead of repeating
+labels on every option row. The Add editor keeps Title/Width beside the preview;
+optional chart settings live in an Appearance disclosure, opened automatically
+when editing a chart with customized appearance. Empty layouts and sections
+offer a direct Add action rather than a paragraph of instructions. Detail
+drawers use the selected Run/task name as their single visible heading.
+
 Remove nested board editing, layout JSON editing, arbitrary pane splitting,
 preview/pin tab management, and multiple competing live controls. Flat sections
 organize visible content without becoming prerequisites for seeing charts.
+
+Panel width presets retain responsive Normal and full-row Wide, with explicit
+1/4, 1/3, 1/2, 2/3 and 3/4 choices in Add/Edit. Fractions refer to the section's
+available width and share a twelve-column grid; Normal keeps its existing
+two-/three-column behavior. All presets fill one row on narrow workspaces.
+Widths persist with the workspace, and fullscreen placeholders retain the
+original span without replacing the chart canvas or resetting zoom.
 
 ### Tables are first-class views of snapshot evidence
 
@@ -445,6 +461,16 @@ Two table types have distinct semantics:
 
 Both types support search, sortable columns, explicit filters, column selection,
 column order and widths, a fixed header/key column, and bounded pagination.
+Column order uses pointer/touch drag handles in Columns, with Up/Down keyboard
+ordering and a pinned first column, rather than left/right move buttons.
+Reusable named toolbar filter groups offer custom label/value options as a
+dropdown or radio group. Each group selects one value or All; selected groups
+and enabled conditions combine with AND before pagination. Group definitions
+and selections are workspace configuration shared by tables, bars and status views.
+The filter editor separates Conditions and Groups into keyboard-accessible tabs.
+Switching tabs preserves unfinished drafts; both tabs still edit the same
+AND-combined query. Group option rows use one Value/Label header, and the Columns
+editor uses one Decimals header with per-column accessible control names.
 Numeric columns also have Auto or 0-20 decimal places. Formatting rounds exact
 decimal text for display only; raw values still drive filtering, sorting,
 tooltips, and CSV export. Width/precision changes do not refetch snapshots.

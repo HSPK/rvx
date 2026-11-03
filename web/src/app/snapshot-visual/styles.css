@@ -1,6 +1,6 @@
 .snapshot-visual-card {display: flex; flex-direction: column; align-self: start; min-width: 0; max-width: 100%; gap: 8px; overflow: visible;}
 .snapshot-visual-card > .panel-header {margin-bottom: 0; flex: none;}
-.snapshot-visual-card .sv-tools {display: flex; gap: 6px; align-items: center; flex: none; min-width: 0;}
+.snapshot-visual-card .sv-tools {display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: none; min-width: 0;}
 .sv-tools .sv-search {width: min(220px, 60%); min-width: 80px; min-height: 30px; height: 30px; padding: 4px 8px; background: transparent; font-size: 12px;}
 .sv-tools .button {min-height: 30px; padding: 4px 7px; font-size: 12px;}
 .snapshot-status-controls {display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px 12px; grid-column: 1 / -1;}
@@ -83,7 +83,7 @@
 .sv-task-drawer {position: fixed; inset: 0 0 0 auto; margin: 0; width: min(560px, 100vw); max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; display: flex; flex-direction: column;}
 .sv-task-drawer:not([open]) {display: none;}
 .sv-task-drawer .dialog-body {min-height: 0; overflow: auto; flex: 1;}
-.sv-task-title {font-size: 16px; overflow-wrap: anywhere; margin-bottom: 12px;}
+.sv-task-drawer .dialog-header > h2 {min-width: 0; overflow-wrap: anywhere;}
 .sv-task-provenance {font-size: 12px; line-height: 1.5; margin-bottom: 18px;}
 .sv-task-fields {display: grid; grid-template-columns: minmax(70px, 30%) minmax(0, 1fr); gap: 12px; font-size: 12px; margin: 0 0 16px; line-height: 1.5;}
 .sv-task-fields dt {color: var(--muted); overflow-wrap: anywhere;}

@@ -98,6 +98,62 @@ impl Fixture {
 }
 
 #[test]
+fn ui_fractional_widths_roundtrip_and_reject_unsupported_sizes_atomically() {
+    let fixture = Fixture::new();
+    let sizes = [
+        "normal",
+        "quarter",
+        "third",
+        "half",
+        "two-thirds",
+        "three-quarters",
+        "wide",
+    ];
+    let mut input = fixture.input();
+    let chart = input["sets"][0]["panels"][0].clone();
+    input["sets"][0]["panels"] = Value::Array(
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| {
+                let mut panel = chart.clone();
+                panel["id"] = json!(format!("width-{index}"));
+                panel["size"] = json!(size);
+                panel
+            })
+            .collect(),
+    );
+    let saved = fixture.save(input.clone()).unwrap();
+    let encoded = serde_json::to_value(&saved).unwrap();
+    for (index, size) in sizes.iter().enumerate() {
+        assert_eq!(encoded["sets"][0]["panels"][index]["size"], json!(size));
+    }
+    input["revision"] = json!(1);
+    input["mutation_id"] = json!("invalid-width");
+    for size in [json!("full"), json!("1/2"), json!(50), Value::Null] {
+        input["sets"][0]["panels"][0]["size"] = size;
+        assert!(fixture.save(input.clone()).is_err());
+        assert_eq!(
+            fixture
+                .engine
+                .ui_state(Some(&fixture.browser))
+                .unwrap()
+                .state
+                .workspaces,
+            saved
+        );
+    }
+    let path = fixture.directory.path().to_owned();
+    let browser = fixture.browser.clone();
+    drop(fixture.engine);
+    let reopened = Engine::open(path).unwrap();
+    assert_eq!(
+        reopened.ui_state(Some(&browser)).unwrap().state.workspaces,
+        saved
+    );
+}
+
+#[test]
 fn ui_durable_roundtrip_keeps_shared_workspaces_and_independent_browser_preferences() {
     let fixture = Fixture::new();
     let other = fixture.engine.ui_state(None).unwrap();
@@ -611,6 +667,61 @@ fn ui_exact_capacity_is_preserved_without_evicting_existing_workspaces() {
         saved
     );
 }
+#[test]
+fn ui_filter_groups_roundtrip_and_reject_invalid_options_without_mutation() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input();
+    let groups = json!([
+        {"id":"status","name":"Status","path":"/status","display":"radio",
+         "options":[{"label":"Running","value":"running"},{"label":"Queued","value":"queued"}],"selected":"running"},
+        {"id":"queue","name":"Queue","path":"/queue","display":"select",
+         "options":[{"label":"B01","value":"b01"},{"label":"B04","value":"b04"}]}
+    ]);
+    input["sets"][0]["panels"][2]["query"]["filterGroups"] = groups.clone();
+    for (pointer, value) in [
+        ("/0/selected", json!("missing")),
+        ("/0/name", json!(" ")),
+        ("/0/display", json!("checkbox")),
+        ("/0/options", json!([])),
+        ("/0/options/1/value", json!("running")),
+        ("/1/id", json!("status")),
+        ("/0/selected", Value::Null),
+        ("/0/options/0/value", json!("x".repeat(4097))),
+    ] {
+        let mut bad = input.clone();
+        *bad["sets"][0]["panels"][2]["query"]["filterGroups"]
+            .pointer_mut(pointer)
+            .unwrap() = value;
+        assert!(fixture.save(bad).is_err(), "{pointer}");
+        assert_eq!(
+            fixture
+                .engine
+                .ui_state(Some(&fixture.browser))
+                .unwrap()
+                .state
+                .workspaces
+                .revision,
+            0
+        );
+    }
+    let saved = fixture.save(input).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["sets"][0]["panels"][2]["query"]["filterGroups"],
+        groups
+    );
+    let path = fixture.directory.path().to_owned();
+    drop(fixture.engine);
+    let reopened = Engine::open(path).unwrap();
+    assert_eq!(
+        reopened
+            .ui_state(Some(&fixture.browser))
+            .unwrap()
+            .state
+            .workspaces,
+        saved
+    );
+}
+
 #[test]
 fn ui_column_decimals_preserve_auto_and_roundtrip_display_only_precision() {
     let automatic: ColumnPreference =

@@ -1,4 +1,5 @@
 import {button, el, iconButton} from "./ui";
+import type {PanelSize} from "./model";
 
 export type PanelAction = "edit" | "remove" | "size" | "expand";
 
@@ -55,7 +56,7 @@ export class PanelChrome {
   /** Prevent transient chart readouts from appearing over an open action menu. */
   get menuOpen(): boolean {return this.menu.matches(":popover-open");}
   /** Update names and size hints without replacing focused controls. */
-  update(title: string, unit: string | null, size: "normal" | "wide"): void {
+  update(title: string, unit: string | null, size: PanelSize): void {
     this.titleText.textContent = title;
     this.title.setAttribute("aria-label", title);
     this.title.title = title; this.unit.textContent = unit ?? "";

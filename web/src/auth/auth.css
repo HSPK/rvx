@@ -13,7 +13,8 @@
 .auth-page > .brand {display: inline-flex; align-items: center; gap: 7px;}
 .auth-page > .brand .brand-icon {width: 28px; height: 28px;}
 .auth-page > .brand .brand-wordmark {width: 38px; height: 19px;}
-.auth-title {font-size: 26px; line-height: 1.25; letter-spacing: -.6px; font-weight: 600; margin: 0 0 10px;}
+.auth-title {font-size: 26px; line-height: 1.25; letter-spacing: -.6px; font-weight: 600; margin: 0 0 24px;}
+.auth-title:has(+ .auth-description) {margin-bottom: 10px;}
 .auth-description {font-size: 14px; line-height: 1.55; color: var(--auth-muted); margin: 0 0 28px;}
 .auth-form {display: flex; flex-direction: column; gap: 10px;}
 .auth-label {font-size: 13px; font-weight: 500; line-height: 20px;}

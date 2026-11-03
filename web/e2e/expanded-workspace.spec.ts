@@ -1,5 +1,5 @@
 import {test, expect, type Page} from "@playwright/test";
-import {mockApi, type FixtureOptions, selectAddType, selectedObservation} from "./fixtures";
+import {mockApi, seedWorkspace, serverState, type FixtureOptions, selectAddType, selectedObservation} from "./fixtures";
 
 async function openAdd(page: Page, kind = "chart") {
   await page.getByRole("button", {name: "Add", exact: true}).click();
@@ -7,6 +7,98 @@ async function openAdd(page: Page, kind = "chart") {
   await selectAddType(editor, kind);
   return editor;
 }
+
+test("fractional chart widths render, persist and retain zoom and fullscreen placeholder spans", async ({page}) => {
+  await page.clock.install();
+  await mockApi(page);
+  await seedWorkspace(page, [{path: "/progress/loss", size: "normal"}, {path: "/progress/reward", size: "normal"}]);
+  await page.goto("/rvx?runs=run-1");
+  const chart = page.locator('[data-panel-id="seed-0"]'), grid = page.locator(".section-grid");
+  await expect(chart.locator("canvas")).toBeVisible();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  const canvas = await chart.locator("canvas").elementHandle();
+  const box = (await chart.locator(".u-over").boundingBox())!;
+  await page.mouse.move(box.x + 25, box.y + 30); await page.mouse.down();
+  await page.mouse.move(box.x + box.width * .7, box.y + 30, {steps: 4}); await page.mouse.up();
+  const zoom = await chart.locator(".chart-host").getAttribute("aria-description");
+  for (const [size, fraction] of [["normal", .5], ["wide", 1], ["quarter", .25], ["third", 1 / 3], ["half", .5], ["three-quarters", .75], ["two-thirds", 2 / 3]] as const) {
+    await chart.locator(".menu-trigger").click();
+    await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
+    const editor = page.getByRole("dialog", {name: "Edit panel", exact: true});
+    await editor.getByRole("combobox", {name: "Panel width", exact: true}).selectOption(size);
+    await editor.getByRole("button", {name: "Save changes", exact: true}).click();
+    await page.clock.runFor(80);
+    await expect(chart).toHaveAttribute("data-panel-size", size);
+    const width = (await grid.boundingBox())!.width;
+    const gap = await grid.evaluate(node => Number.parseFloat(getComputedStyle(node).columnGap));
+    expect((await chart.boundingBox())!.width).toBeCloseTo((width + gap) * fraction - gap, 0);
+    expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+    await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
+  }
+  const originalWidth = (await chart.boundingBox())!.width;
+  await chart.locator(".menu-trigger").click();
+  await chart.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await page.clock.runFor(80);
+  expect((await page.locator(".panel-placeholder").boundingBox())!.width).toBeCloseTo(originalWidth, 0);
+  expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+  await page.keyboard.press("Escape"); await page.clock.runFor(80);
+  expect((await chart.boundingBox())!.width).toBeCloseTo(originalWidth, 0);
+  await page.getByRole("button", {name: "Save current workspace", exact: true}).click();
+  await expect(page.locator(".workspace-save-slot")).toHaveText("Saved");
+  expect((await serverState(page)).workspaces.sets[0]!.panels[0]!.size).toBe("two-thirds");
+  await page.clock.resume(); await page.reload();
+  await expect(chart).toHaveAttribute("data-panel-size", "two-thirds");
+  await expect(chart.locator("canvas")).toBeVisible();
+  await chart.locator(".menu-trigger").click();
+  await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
+  await expect(page.getByRole("combobox", {name: "Panel width", exact: true})).toHaveValue("two-thirds");
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({width: 2560, height: 900});
+  const normal = page.locator('[data-panel-id="seed-1"]');
+  await expect.poll(async () => {
+    const width = (await grid.boundingBox())!.width;
+    const gap = await grid.evaluate(node => Number.parseFloat(getComputedStyle(node).columnGap));
+    return Math.abs((await normal.boundingBox())!.width - ((width + gap) / 3 - gap));
+  }).toBeLessThan(1);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({width, height: 844});
+    expect((await chart.boundingBox())!.width).toBeCloseTo((await grid.boundingBox())!.width, 0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+});
+
+test("adding a quarter-width chart retains its preset and fits its canvas even below 180px", async ({page}) => {
+  await mockApi(page);
+  await seedWorkspace(page, [{path: "/progress/reward", size: "normal"}]);
+  await page.goto("/rvx?runs=run-1&live=0");
+  const editor = await openAdd(page);
+  await editor.getByRole("checkbox", {name: "Select metric Policy loss", exact: true}).check();
+  await editor.getByRole("combobox", {name: "Panel width", exact: true}).selectOption("quarter");
+  await editor.getByRole("button", {name: "Add", exact: true}).click();
+  const chart = page.locator('.section-grid [data-path="/progress/loss"]');
+  await expect(chart).toHaveAttribute("data-panel-size", "quarter");
+  for (const width of [1440, 1100, 1000, 901, 900, 390, 320]) {
+    await page.setViewportSize({width, height: 844});
+    await expect(chart.locator("canvas")).toBeVisible();
+    await expect.poll(async () => {
+      const plot = (await chart.locator(".uplot").boundingBox())!.width;
+      const host = await chart.locator(".chart-host").evaluate(node => node.clientWidth);
+      return Math.abs(plot - host);
+    }).toBeLessThanOrEqual(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await page.getByRole("button", {name: "Save current workspace", exact: true}).click();
+  await expect(page.locator(".workspace-save-slot")).toHaveText("Saved");
+  await page.setViewportSize({width: 1000, height: 844}); await page.reload();
+  await expect(chart).toHaveAttribute("data-panel-size", "quarter");
+  await expect(chart.locator("canvas")).toBeVisible();
+  expect((await chart.locator(".chart-host").boundingBox())!.width).toBeLessThan(180);
+  await expect.poll(async () => {
+    const plot = (await chart.locator(".uplot").boundingBox())!.width;
+    const host = await chart.locator(".chart-host").evaluate(node => node.clientWidth);
+    return Math.abs(plot - host);
+  }).toBeLessThanOrEqual(1);
+});
 
 test("metric checkboxes survive filtering, default to separate panels, and retain real hover gaps", async ({page}) => {
   await mockApi(page);
@@ -113,6 +205,7 @@ test("snapshot tables page, search, filter and sort latest exact rows before pag
   await expect(table.locator("tbody tr")).toHaveCount(1);
   await expect(table.locator(".table-footer")).toContainText("1–1 of 1");
   await table.getByRole("searchbox", {name: "Search table rows"}).fill("");
+  await expect(table.locator("tbody tr")).toHaveCount(75);
   await table.getByRole("button", {name: "Filter", exact: true}).click();
   const filter = page.getByRole("dialog", {name: "Filter rows", exact: true});
   await filter.getByRole("combobox", {name: "Filter column"}).selectOption("/load");

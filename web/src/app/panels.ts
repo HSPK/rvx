@@ -1,13 +1,17 @@
 import {uiIdentifier} from "../core/identifiers";
-import {copyChart, isRecord, validChartSpec, type ChartSpec} from "./model";
+import {copyChart, isRecord, validChartSpec, validPanelSize, type ChartSpec, type PanelSize} from "./model";
 import type {TableFilter} from "../domain/tables";
 import type {SnapshotView} from "../domain/snapshot-views";
 import {copySnapshotView, validSnapshotView} from "./snapshot-config";
 
 export interface ColumnPreference {id: string; hidden?: boolean; width?: number; decimals?: number}
 export interface TableFilterPreference extends TableFilter {enabled?: boolean}
-export interface TableQueryPreference {search?: string; filters?: TableFilterPreference[]; sort?: {path: string; direction: "asc" | "desc"}}
-interface BasePanel {id: string; sectionId: string; size: "normal" | "wide"}
+export interface TableFilterGroup {
+  id: string; name: string; path: string; display: "select" | "radio";
+  options: {label: string; value: string}[]; selected?: string;
+}
+export interface TableQueryPreference {search?: string; filters?: TableFilterPreference[]; filterGroups?: TableFilterGroup[]; sort?: {path: string; direction: "asc" | "desc"}}
+interface BasePanel {id: string; sectionId: string; size: PanelSize}
 export interface ChartPanel extends BasePanel, ChartSpec {kind: "chart"}
 export interface MetricTablePanel extends BasePanel {kind: "metric-table"; paths: string[]; title?: string; sourceIds?: string[]; columns?: ColumnPreference[]; query?: TableQueryPreference}
 export interface SnapshotTablePanel extends BasePanel {kind: "snapshot-table"; path: string; title?: string; sourceIds?: string[]; columns?: ColumnPreference[]; query?: TableQueryPreference; view?: SnapshotView}
@@ -22,6 +26,33 @@ export interface WorkspaceSet extends WorkspaceLayout {id: string; name: string;
 export const panelLimit = 24;
 export const sectionLimit = 24;
 export const tableColumnLimit = 128 + 3;
+export const filterGroupLimit = 16;
+const byteLength = (value: string): number => new TextEncoder().encode(value).length;
+
+export function copyFilterGroups(groups: TableFilterGroup[] = []): TableFilterGroup[] {
+  return groups.map(group => ({...group, options: group.options.map(option => ({...option}))}));
+}
+
+/** Every selected group contributes one equality condition to the existing native AND query. */
+export function activeTableFilters(query?: TableQueryPreference): TableFilter[] {
+  return [...(query?.filters ?? []).filter(filter => filter.enabled !== false).map(({path, op, value}) => ({path, op, value})),
+    ...(query?.filterGroups ?? []).flatMap(group => group.selected === undefined ? [] : [{path: group.path, op: "eq" as const, value: group.selected}])];
+}
+
+export function validFilterGroups(value: unknown): value is TableFilterGroup[] {
+  const text = (value: unknown, limit = 4096): value is string => typeof value === "string"
+    && Array.from(value).length <= limit && byteLength(value) <= 4096 && !value.includes("\0");
+  return Array.isArray(value) && value.length <= filterGroupLimit && new Set(value.map(group => isRecord(group) ? group.id : undefined)).size === value.length
+    && value.every(group => isRecord(group) && typeof group.id === "string" && group.id.length > 0 && byteLength(group.id) <= 256
+      && group.id.trim() === group.id && !/\p{Cc}/u.test(group.id)
+      && text(group.name, 120) && group.name.trim().length > 0
+      && text(group.path) && (group.display === "select" || group.display === "radio")
+      && Array.isArray(group.options) && group.options.length > 0 && group.options.length <= 32
+      && group.options.every(option => isRecord(option) && text(option.label, 120) && option.label.trim().length > 0
+        && text(option.value) && option.value.trim().length > 0)
+      && new Set(group.options.map(option => option.value)).size === group.options.length
+      && (group.selected === undefined || typeof group.selected === "string" && group.options.some(option => option.value === group.selected)));
+}
 
 /** Start with one unheaded group, not a visible hierarchy users must configure. */
 export function emptyLayout(): WorkspaceLayout {
@@ -33,7 +64,8 @@ export function copyPanel(panel: PanelSpec): PanelSpec {
   return {...panel, ...(panel.kind === "metric-table" ? {paths: [...panel.paths]} : {}),
     ...(panel.kind === "snapshot-table" && panel.view ? {view: copySnapshotView(panel.view)} : {}),
     ...(panel.sourceIds ? {sourceIds: [...panel.sourceIds]} : {}), ...(panel.columns ? {columns: panel.columns.map(column => ({...column}))} : {}),
-    ...(panel.query ? {query: {...panel.query, ...(panel.query.sort ? {sort: {...panel.query.sort}} : {}), ...(panel.query.filters ? {filters: panel.query.filters.map(filter => ({...filter}))} : {})}} : {})};
+    ...(panel.query ? {query: {...panel.query, ...(panel.query.sort ? {sort: {...panel.query.sort}} : {}), ...(panel.query.filters ? {filters: panel.query.filters.map(filter => ({...filter}))} : {}),
+      ...(panel.query.filterGroups ? {filterGroups: copyFilterGroups(panel.query.filterGroups)} : {})}} : {})};
 }
 /** Preserve stable panel and section identities when saving or selecting named workspace sets. */
 export function copyLayout(layout: WorkspaceLayout): WorkspaceLayout {
@@ -53,7 +85,7 @@ export function validLayout(value: unknown): value is WorkspaceLayout {
 }
 /** Reject unsupported presentation, malformed table columns, and empty metric selections explicitly. */
 export function validPanel(value: unknown): value is PanelSpec {
-  if (!isRecord(value) || typeof value.id !== "string" || typeof value.sectionId !== "string" || (value.size !== "normal" && value.size !== "wide")) return false;
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.sectionId !== "string" || !validPanelSize(value.size)) return false;
   if (value.view !== undefined && (value.kind !== "snapshot-table" || !validSnapshotView(value.view))) return false;
   if (value.kind === "chart") return validChartSpec(value);
   if (value.kind !== "metric-table" && value.kind !== "snapshot-table") return false;
@@ -66,6 +98,7 @@ export function validPanel(value: unknown): value is PanelSpec {
     if (!isRecord(query) || query.search !== undefined && typeof query.search !== "string") return false;
     if (query.sort !== undefined && (!isRecord(query.sort) || typeof query.sort.path !== "string" || query.sort.direction !== "asc" && query.sort.direction !== "desc")) return false;
     if (query.filters !== undefined && (!Array.isArray(query.filters) || query.filters.length > 32 || !query.filters.every(filter => isRecord(filter) && typeof filter.path === "string" && typeof filter.value === "string" && typeof filter.op === "string" && ["contains", "eq", "gt", "lt"].includes(filter.op) && (filter.enabled === undefined || typeof filter.enabled === "boolean")))) return false;
+    if (query.filterGroups !== undefined && (!validFilterGroups(query.filterGroups) || (Array.isArray(query.filters) ? query.filters.length : 0) + query.filterGroups.length > 32)) return false;
   }
   if (value.columns !== undefined && (!Array.isArray(value.columns) || value.columns.length > tableColumnLimit || !value.columns.every(column => isRecord(column) && typeof column.id === "string"
     && (column.hidden === undefined || typeof column.hidden === "boolean")

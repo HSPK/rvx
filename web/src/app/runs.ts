@@ -121,7 +121,7 @@ export class Runs {
     if (!this.active || this.disposed) return;
     if (!this.filtered.length) {
       this.rows.style.height = "";
-      this.rows.replaceChildren(message(this.metadata.runs.length ? "No matching runs" : "No runs yet", this.metadata.runs.length ? "Change a filter to find another run. Your selection is unchanged." : "Registered runs will appear here."));
+      this.rows.replaceChildren(message(this.metadata.runs.length ? "No matching runs" : "No runs yet"));
       return;
     }
     const height = rowHeight;

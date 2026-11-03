@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
-import {chartPanel, copyLayout, emptyLayout, movePanel, removeSection, sectionLimit, tableColumnLimit, validLayout} from "./panels";
+import {activeTableFilters, chartPanel, copyLayout, emptyLayout, movePanel, removeSection, sectionLimit, tableColumnLimit, validFilterGroups, validLayout, type TableFilterGroup} from "./panels";
 import {collectionLabel, compareCells, pageCsv, filterSummaryRows, type ViewRow} from "./table-view";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -42,6 +42,24 @@ describe("persistent independent panels and sections", () => {
     expect(layout.panels[0]?.kind !== "chart" && layout.panels[0]?.columns?.length).toBe(tableColumnLimit);
     expect(validLayout(layout)).toBe(true);
   });
+  it("deep-copies toolbar groups and rejects ambiguous options or unknown selections", () => {
+    const group: TableFilterGroup = {id: "status", name: "Status", path: "/status", display: "radio",
+      options: [{label: "Running", value: "running"}, {label: "Queued", value: "queued"}], selected: "running"};
+    const layout = emptyLayout();
+    layout.panels.push({id: "table", kind: "snapshot-table", sectionId: layout.sections[0]!.id, path: "/tasks", size: "wide", query: {filterGroups: [group]}});
+    expect(validLayout(layout)).toBe(true);
+    const panel = copyLayout(layout).panels[0]!;
+    if (panel.kind === "chart") throw new Error("Expected table");
+    panel.query!.filterGroups![0]!.options[0]!.label = "Changed";
+    expect(group.options[0]!.label).toBe("Running");
+    expect(validFilterGroups([{...group, selected: "missing"}])).toBe(false);
+    expect(validFilterGroups([{...group, options: [group.options[0]!, group.options[0]!]}])).toBe(false);
+    expect(validFilterGroups([group, {...group}])).toBe(false);
+    expect(validFilterGroups([{...group, name: " "}])).toBe(false);
+    expect(validFilterGroups([{...group, options: []}])).toBe(false);
+    expect(validFilterGroups([{...group, name: "状态".repeat(60)}])).toBe(true);
+    expect(validFilterGroups([{...group, path: "/status\0"}])).toBe(false);
+  });
 });
 describe("exact typed table views", () => {
   it("shortens raw collection path labels without changing meaningful catalog names", () => {
@@ -61,6 +79,22 @@ describe("exact typed table views", () => {
     expect(result[0]?.cells.value?.text).toBe("99");
     expect(filterSummaryRows(rows, {search: "", filters: [{path: "value", op: "eq", value: "5.0"}], offset: 0, limit: 75})).toHaveLength(1);
     expect(filterSummaryRows(rows, {search: "", filters: [{path: "value", op: "gt", value: "90", enabled: false}], offset: 0, limit: 75})).toHaveLength(100);
+  });
+  it("ANDs selected toolbar groups with existing filters without filtering on All groups", () => {
+    const groups: TableFilterGroup[] = [
+      {id: "status", name: "Status", path: "/status", display: "radio", options: [{label: "Running", value: "running"}], selected: "running"},
+      {id: "queue", name: "Queue", path: "/queue", display: "select", options: [{label: "B01", value: "b01"}, {label: "B04", value: "b04"}], selected: "b01"},
+    ];
+    const rows: ViewRow[] = [["running", "b01"], ["queued", "b01"], ["running", "b04"]].map(([status, queue], index) => ({
+      key: String(index), snapshotId: "1", title: "row",
+      cells: {"/status": {kind: "string", text: status!, truncated: false}, "/queue": {kind: "string", text: queue!, truncated: false}},
+    }));
+    const state = {search: "", filters: [], filterGroups: groups, offset: 0, limit: 75};
+    expect(activeTableFilters(state)).toEqual([{path: "/status", op: "eq", value: "running"}, {path: "/queue", op: "eq", value: "b01"}]);
+    expect(filterSummaryRows(rows, state).map(row => row.key)).toEqual(["0"]);
+    delete groups[1]!.selected;
+    expect(filterSummaryRows(rows, state).map(row => row.key)).toEqual(["0", "2"]);
+    expect(activeTableFilters({...state, filters: [{path: "/status", op: "eq", value: "queued", enabled: false}]})).toHaveLength(1);
   });
   it("sorts 10,000 natural text keys with cached collation and unchanged ordering", () => {
     const rows: ViewRow[] = Array.from({length: 10_000}, (_, index) => ({

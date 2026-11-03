@@ -67,7 +67,7 @@ export class ChartWorkspace {
   constructor(private runIds: string[], private metadata: RunMetadata, private reads: MetricCatalogQueryCoordinator, private preferences: PreferencesStore,
     range: RangeState, private colorFor: (id: string) => string, private labelFor: (run: ExperimentRun) => string, private openRuns: () => void, private toggleRun: (id: string) => void,
     private rangeUpdated: (range: RangeState) => void, refreshRuns: () => void, private openRunDetails: (runId: string) => void,
-    private openRunColor: (runId: string) => void, private updateConnectionNotice: (text: string | null) => void = () => {}) {
+    private openRunColor: (runId: string) => void, notificationHost: HTMLElement, private updateConnectionNotice: (text: string | null) => void = () => {}) {
     this.runIds = [...runIds]; this.range = {...range};
     this.session.open(this.layout, this.experimentId);
     this.setupRefresh = button("Refresh runs", refreshRuns, "button primary"); this.setupRefresh.setAttribute("aria-label", "Refresh runs");
@@ -98,13 +98,14 @@ export class ChartWorkspace {
     actions.append(this.subtitle, this.addControl); toolbar.append(strip, time, actions);
     this.notice.setAttribute("role", "status"); this.notice.hidden = true;
     this.selectionFeedback.setAttribute("role", "status"); this.selectionFeedback.hidden = true; this.selectionEmpty.hidden = true;
-    controls.append(toolbar, this.selectionFeedback, this.notice);
+    controls.append(toolbar, this.selectionFeedback);
+    notificationHost.append(this.notice);
     this.scroll.tabIndex = 0; this.scroll.setAttribute("role", "region"); this.scroll.setAttribute("aria-label", "Analysis panels");
     this.scroll.append(this.selectionEmpty, this.grid);
     this.element.append(el("h1", "sr-only", "Run analysis"), controls, this.scroll);
     this.layoutView = new PanelLayout(this.scroll, () => this.layout, () => {this.recordChange(); this.syncPanels(); this.scheduleQuery(false);},
       id => this.openEditor(undefined, id), () => this.visibilityChanged());
-    this.grid.append(message("Loading panels", "Finding recorded fields…"));
+    this.grid.append(message("Loading panels…"));
     this.observer = new IntersectionObserver(entries => {
       let changed = false;
       for (const entry of entries) {
@@ -242,7 +243,7 @@ export class ChartWorkspace {
     if (!valid) {
       this.catalogRequest?.abort(); this.queryRequest?.abort(); this.notice.hidden = true;
       if (!this.metadata.runs.length && !this.runIds.length) this.selectionEmpty.replaceChildren(message("No runs yet", "Set up a Run and register a Source with the RVX CLI, then refresh the Run list.", this.setupRefresh));
-      else this.selectionEmpty.replaceChildren(message(this.runIds.length > 4 ? "Select up to 4 runs" : this.runIds.length ? "Selected runs unavailable" : "Select runs", "Choose runs to display their recorded data.", button("Choose runs", this.openRuns)));
+      else this.selectionEmpty.replaceChildren(message(this.runIds.length > 4 ? "Select up to 4 runs" : this.runIds.length ? "Selected runs unavailable" : "Select runs", "", button("Choose runs", this.openRuns)));
     }
     return valid;
   }
@@ -251,7 +252,7 @@ export class ChartWorkspace {
     if (this.suspended || this.lifetime.signal.aborted || document.hidden || !this.showSelectionState()) return;
     this.catalogRequest?.abort();
     const request = new AbortController(); this.catalogRequest = request; this.busy = true;
-    if (!this.catalog && !this.cards.size) this.grid.replaceChildren(message("Loading panels", "Finding recorded fields…"));
+    if (!this.catalog && !this.cards.size) this.grid.replaceChildren(message("Loading panels…"));
     try {
       const catalog = await this.reads.catalog(this.runs.map(run => run.id), request.signal, fresh);
       if (request.signal.aborted) return;
@@ -284,7 +285,7 @@ export class ChartWorkspace {
     if (!this.layout.panels.length && this.layout.sections.length === 1 && !this.layout.sections[0]!.name) {
       const captures = this.catalog?.runs.reduce((sum, run) => sum + run.snapshot_count, 0) ?? 0;
       const title = this.initialized ? "No panels selected" : !captures ? "Waiting for the first observation" : !this.catalog?.metrics.length ? "Choose a snapshot view" : "Choose recorded fields";
-      this.grid.replaceChildren(message(title, "Use Add to create charts, metric statistics, snapshot views or sections.")); return;
+      this.grid.replaceChildren(message(title, "", button("Add panel", () => this.openEditor(), "button quiet", "plus"))); return;
     }
     if (!this.grid.contains(this.layoutView.element)) this.grid.replaceChildren(this.layoutView.element);
     for (const panel of this.layout.panels) {
@@ -725,5 +726,6 @@ export class ChartWorkspace {
     if (this.savedTimer) clearTimeout(this.savedTimer);
     this.layoutView.destroy(); this.observer.disconnect(); for (const card of this.cards.values()) card.destroy();
     this.cards.clear(); this.openDialog?.close();
+    this.notice.remove();
   }
 }

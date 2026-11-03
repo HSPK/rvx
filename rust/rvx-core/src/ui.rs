@@ -366,10 +366,40 @@ pub struct TableQueryPreference {
     pub filters: Option<Vec<UiTableFilter>>,
     #[serde(
         default,
+        rename = "filterGroups",
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub filter_groups: Option<Vec<UiFilterGroup>>,
+    #[serde(
+        default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     pub sort: Option<TableSortPreference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UiFilterGroup {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub display: UiFilterDisplay,
+    pub options: Vec<UiFilterOption>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub selected: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UiFilterOption {
+    pub label: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -402,7 +432,17 @@ macro_rules! string_enum {
     };
 }
 string_enum!(Theme { Light, Dark });
-string_enum!(PanelSize { Normal, Wide });
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PanelSize {
+    Normal,
+    Quarter,
+    Third,
+    Half,
+    TwoThirds,
+    ThreeQuarters,
+    Wide,
+}
 string_enum!(ChartStyle { Line, Area });
 string_enum!(ChartLegend { Auto, Show, Hide });
 string_enum!(UiFilterOp {
@@ -412,6 +452,7 @@ string_enum!(UiFilterOp {
     Lt
 });
 string_enum!(UiSortDirection { Asc, Desc });
+string_enum!(UiFilterDisplay { Select, Radio });
 
 /// Allow absent optional fields but reject explicit nulls that have no configuration meaning.
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
@@ -783,6 +824,43 @@ fn validate_table(
                         .all(|filter| text(&filter.path, 4096) && text(&filter.value, 4096)),
                 "at most 32 filters with 4096-byte strings are allowed",
             )?;
+        }
+        if let Some(groups) = &query.filter_groups {
+            check(
+                groups.len() <= 16
+                    && groups.len() + query.filters.as_ref().map_or(0, Vec::len) <= 32,
+                "at most 16 filter groups and 32 total filters are allowed",
+            )?;
+            let mut ids = HashSet::new();
+            for group in groups {
+                check(
+                    valid_ui_id(&group.id)
+                        && ids.insert(&group.id)
+                        && !group.name.trim().is_empty()
+                        && text(&group.name, 120)
+                        && text(&group.path, 4096),
+                    "invalid or duplicate filter group",
+                )?;
+                let mut values = HashSet::new();
+                check(
+                    !group.options.is_empty()
+                        && group.options.len() <= 32
+                        && group.options.iter().all(|option| {
+                            !option.label.trim().is_empty()
+                                && text(&option.label, 120)
+                                && !option.value.trim().is_empty()
+                                && text(&option.value, 4096)
+                                && values.insert(&option.value)
+                        }),
+                    "filter groups require 1 to 32 uniquely valued, nonempty options",
+                )?;
+                check(
+                    group.selected.as_ref().map_or(true, |selected| {
+                        group.options.iter().any(|option| &option.value == selected)
+                    }),
+                    "selected filter option is not defined",
+                )?;
+            }
         }
     }
     Ok(())

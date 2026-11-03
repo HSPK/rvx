@@ -1,5 +1,5 @@
 import {test, expect} from "@playwright/test";
-import {mockApi, runs, type FixtureOptions} from "./fixtures";
+import {mockApi, runs, seedUiState, uiServer, type FixtureOptions} from "./fixtures";
 
 test("initial metadata and catalog retries show loading before recovering", async ({page}) => {
   const options: FixtureOptions = {failCatalog: true};
@@ -57,7 +57,7 @@ test("metadata recovery clears only its own notification and preserves preferenc
   await expect(notice).toBeHidden();
 });
 
-test("lost updates use compact status chrome without moving the layout or discarding the last frame", async ({page}) => {
+test("lost updates use bottom-right floating notifications without moving the layout or discarding the last frame", async ({page}) => {
   const options: FixtureOptions = {failCatalog: false};
   await mockApi(page, options);
   await page.goto("/rvx?runs=run-1");
@@ -67,22 +67,63 @@ test("lost updates use compact status chrome without moving the layout or discar
   const before = (await page.locator(".chart-scroll").boundingBox())!.y;
   options.failCatalog = true;
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-  const notice = page.locator(".connection-host .connection-notice");
-  await expect(notice.locator(".connection-notice-label")).toHaveText("Updates unavailable");
+  const notice = page.locator(".notification-region .preferences-notice");
+  await expect(notice).toContainText("Updates unavailable");
   await expect(notice).toHaveAttribute("title", /Catalog temporarily unavailable/);
-  const message = (await notice.boundingBox())!, dot = (await page.locator(".connection-dot").boundingBox())!;
-  expect(message.x + message.width).toBeLessThanOrEqual(dot.x);
+  await expect(page.getByRole("region", {name: "Notifications", exact: true})).toHaveCSS("position", "fixed");
   expect((await page.locator(".chart-scroll").boundingBox())!.y).toBe(before);
   await expect(page.locator(".workspace-page .workspace-notice")).toBeHidden();
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   for (const width of [390, 320, 1440]) {
     await page.setViewportSize({width, height: 900});
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const box = (await notice.boundingBox())!;
+    expect(box.x + box.width).toBeLessThanOrEqual(width - 16);
+    expect(box.x + box.width).toBeGreaterThan(width - 24);
+    expect(box.y + box.height).toBeGreaterThan(900 - 24);
+    await expect(notice.getByRole("button", {name: "Retry", exact: true})).toBeInViewport();
   }
   options.failCatalog = false;
   await notice.getByRole("button", {name: "Retry", exact: true}).click();
   await expect(notice).toBeHidden();
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+});
+
+test("newer workspace messages float outside the layout and dismiss without changing the current canvas", async ({page}) => {
+  await page.clock.install(); await mockApi(page);
+  await seedUiState(page, {selected: {"experiment-1": "saved"}, sets: [{
+    id: "saved", name: "Analysis", experimentId: "experiment-1", sections: [{id: "main", name: "", collapsed: false}],
+    panels: [{kind: "chart", id: "chart", sectionId: "main", size: "normal", path: "/progress/loss"}],
+  }]});
+  let socket!: import("@playwright/test").WebSocketRoute;
+  await page.routeWebSocket("**/api/ui/connection", current => {
+    socket = current;
+    current.onMessage(message => current.send(JSON.stringify({type: "pong", id: JSON.parse(String(message)).id})));
+  });
+  await page.goto("/rvx?runs=run-1");
+  const chart = page.locator(".chart-card"), scroll = page.locator(".chart-scroll");
+  await expect(chart.locator("canvas")).toBeVisible();
+  await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "connected");
+  const canvas = await chart.locator("canvas").elementHandle(), before = await scroll.boundingBox();
+  const server = uiServer(page); server.workspaces.revision++;
+  server.workspaces.sets[0]!.panels[0]!.size = "wide";
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  await page.route("**/api/charts/catalog", async route => {await gate; await route.fallback();});
+  try {
+    socket.close(); await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "offline");
+    await page.clock.runFor(1001);
+    const notice = page.locator(".notification-region > .workspace-notice:not(.preferences-notice)");
+    await expect(notice).toContainText("A newer workspace is available on the server. Your current layout is unchanged.");
+    await expect(notice.getByRole("button", {name: "Try again", exact: true})).toBeVisible();
+    expect(await scroll.boundingBox()).toEqual(before);
+    await expect(page.locator(".workspace-page .workspace-notice,.appbar .workspace-notice")).toHaveCount(0);
+    await expect(chart).not.toHaveClass(/wide/);
+    expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
+    await notice.getByRole("button", {name: "Dismiss message", exact: true}).click();
+    await expect(notice).toBeHidden();
+    expect(await scroll.boundingBox()).toEqual(before);
+  } finally {release();}
 });
 
 test("run sheets fit empty, short and large lists without moving the search field", async ({page}) => {
@@ -152,8 +193,10 @@ test("breakpoint changes move one selector without resetting plots, zoom or keyb
       return Math.abs(plot!.height - host!.height);
     }).toBeLessThanOrEqual(1);
     if ([1100, 901, 900, 390].includes(width)) {
-      const columns = await page.locator(".chart-grid").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length);
-      expect(columns).toBe(width === 901 || width === 390 ? 1 : 2);
+      await expect.poll(() => page.locator(".chart-grid > [data-panel-id]").evaluateAll(nodes => {
+        const top = nodes[0]!.getBoundingClientRect().top;
+        return nodes.filter(node => Math.abs(node.getBoundingClientRect().top - top) < 1).length;
+      })).toBe(width === 901 || width === 390 ? 1 : 2);
     }
     await expect(page.locator(".runs-selector")).toHaveCount(1);
     expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
@@ -166,7 +209,10 @@ test("breakpoint changes move one selector without resetting plots, zoom or keyb
   await expect(page.locator(".runs-dock")).toBeVisible();
   await expect(page.getByRole("searchbox", {name: "Search runs"})).toBeFocused();
   await page.setViewportSize({width: 1800, height: 900});
-  expect(await page.locator(".chart-grid").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length)).toBe(3);
+  await expect.poll(() => page.locator(".chart-grid > [data-panel-id]").evaluateAll(nodes => {
+    const top = nodes[0]!.getBoundingClientRect().top;
+    return nodes.filter(node => Math.abs(node.getBoundingClientRect().top - top) < 1).length;
+  })).toBe(3);
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
   await page.setViewportSize({width: 844, height: 390});

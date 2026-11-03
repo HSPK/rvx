@@ -142,6 +142,58 @@ test("column decimals preserve exact raw values and exports, without refetching 
   await expect(card.locator('tbody [data-column="/counter"]').first()).toHaveText("18446744073709551615");
 });
 
+test("column handles offer keyboard ordering and cancel outside or escaped pointer drops", async ({page}) => {
+  const requests = await mockApi(page, {tableRows: 10}); await seed(page, [table]);
+  await page.goto("/rvx?runs=run-1&live=0");
+  const card = page.locator(".table-card");
+  await expect(card.locator("tbody tr")).toHaveCount(10);
+  const reads = requests.filter(request => request.path === "/api/tables/rows").length;
+  await card.getByRole("button", {name: "Columns", exact: true}).click();
+  const modal = page.getByRole("dialog", {name: "Columns", exact: true});
+  await expect(modal.getByRole("button", {name: /Move .* column (left|right)/})).toHaveCount(0);
+  await expect(modal.getByRole("button", {name: "Reorder Key column", exact: true})).toBeDisabled();
+  const handle = modal.getByRole("button", {name: "Reorder load column", exact: true});
+  await handle.focus(); await page.keyboard.press("ArrowUp");
+  await expect(card.locator("thead th").nth(1)).toHaveAttribute("data-column", "/load");
+  await page.keyboard.press("ArrowUp");
+  await expect(card.locator("thead th").first()).toHaveAttribute("data-column", "$key");
+  for (const cancel of ["outside", "escape"]) {
+    const box = (await handle.boundingBox())!, list = (await modal.locator(".column-order-list").boundingBox())!;
+    await page.mouse.move(box.x + 10, box.y + 10); await page.mouse.down();
+    await page.mouse.move(box.x + 15, box.y + 70, {steps: 5});
+    if (cancel === "outside") await page.mouse.move(list.x - 10, list.y - 10);
+    else await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await expect(modal).toBeVisible();
+    await expect(card.locator("thead th").nth(1)).toHaveAttribute("data-column", "/load");
+    await expect(modal.locator(".column-dragging,.column-drop-before,.column-drop-after")).toHaveCount(0);
+  }
+  expect(requests.filter(request => request.path === "/api/tables/rows").length).toBe(reads);
+  await page.keyboard.press("Escape");
+});
+
+test("touch column handles reorder without changing visibility or decimal preferences", async ({browser}) => {
+  const context = await browser.newContext({baseURL: test.info().project.use.baseURL, viewport: {width: 390, height: 844}, isMobile: true, hasTouch: true});
+  try {
+    const page = await context.newPage();
+    await mockApi(page, {tableRows: 10}); await seed(page, [{...table, columns: [{id: "$key"}, {id: "/name", width: 220}, {id: "/load", decimals: 2}, {id: "/healthy", hidden: true}]}]);
+    await page.goto("/rvx?runs=run-1&live=0");
+    const card = page.locator(".table-card"); await expect(card.locator("tbody tr")).toHaveCount(10);
+    await card.getByRole("button", {name: "Columns", exact: true}).click();
+    const modal = page.getByRole("dialog", {name: "Columns", exact: true});
+    const start = (await modal.getByRole("button", {name: "Reorder load column", exact: true}).boundingBox())!;
+    const target = (await modal.locator(".column-option").filter({has: page.getByRole("checkbox", {name: "Show name", exact: true})}).boundingBox())!;
+    const session = await context.newCDPSession(page);
+    await session.send("Input.dispatchTouchEvent", {type: "touchStart", touchPoints: [{x: start.x + 12, y: start.y + 12}]});
+    await session.send("Input.dispatchTouchEvent", {type: "touchMove", touchPoints: [{x: target.x + 14, y: target.y + 5}]});
+    await session.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+    await expect(card.locator("thead th").nth(1)).toHaveAttribute("data-column", "/load");
+    await expect(modal.getByRole("checkbox", {name: "Show healthy", exact: true})).not.toBeChecked();
+    await expect(modal.getByRole("combobox", {name: "Decimal places for load", exact: true})).toHaveValue("2");
+    await session.detach();
+  } finally {await context.close();}
+});
+
 test("filters can be disabled, re-enabled and edited without losing their saved definitions", async ({page}) => {
   const requests = await mockApi(page, {tableRows: 100});
   await seed(page, [{...table, query: {filters: [{path: "/load", op: "gt", value: "90"}]}}]);
@@ -250,13 +302,41 @@ test("responsive toolbars group actions and keep touch details accessible withou
     await page.screenshot({path: `artifacts/compact-controls-${width}.png`});
     const card = page.locator(".table-card");
     await card.scrollIntoViewIfNeeded();
-    const buttons = await card.locator(".table-tools > button").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().y));
+    const buttons = await card.locator(".table-actions > button").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().y));
     expect(new Set(buttons).size).toBe(1);
     await expect(page.getByText(/independent source observation|Collection discovery is partial/)).toHaveCount(0);
     await page.locator(".chart-scroll").evaluate(node => {node.scrollTop = 0;});
   }
   await page.getByRole("button", {name: "Add", exact: true}).click();
   await page.screenshot({path: "artifacts/compact-add-mobile.png"});
+});
+
+test("Add keeps optional appearance controls behind a keyboard disclosure without losing their draft", async ({page}) => {
+  await mockApi(page); await seed(page, [chart]);
+  await page.goto("/rvx?runs=run-1");
+  await page.getByRole("button", {name: "Add", exact: true}).click();
+  const editor = page.getByRole("dialog", {name: "Add", exact: true});
+  const appearance = editor.locator(".editor-appearance > summary");
+  const width = editor.getByRole("spinbutton", {name: "Line width", exact: true});
+  await expect(width).toBeHidden();
+  await expect(editor.getByRole("textbox", {name: "Panel title", exact: true})).toBeVisible();
+  await appearance.focus(); await page.keyboard.press("Enter");
+  await width.fill("3");
+  await appearance.click(); await expect(width).toBeHidden();
+  await appearance.click(); await expect(width).toHaveValue("3");
+  await editor.getByRole("tab", {name: "Snapshot", exact: true}).click();
+  await expect(appearance).toBeHidden();
+  await editor.getByRole("tab", {name: "Chart", exact: true}).click();
+  await expect(width).toHaveValue("3");
+  for (const viewport of [{width: 1440, height: 900}, {width: 390, height: 844}, {width: 320, height: 568}, {width: 844, height: 390}]) {
+    await page.setViewportSize(viewport);
+    await expect(editor.getByRole("button", {name: "Cancel", exact: true})).toBeInViewport();
+    expect(await editor.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    await width.scrollIntoViewIfNeeded(); await expect(width).toBeInViewport();
+  }
+  await editor.getByRole("button", {name: "Cancel", exact: true}).click();
+  await expect(page.locator(".section-grid .chart-card")).toHaveCount(1);
+  await expect(page.locator(".workspace-save.save-needed")).toHaveCount(0);
 });
 
 test("touch devices keep Run details discoverable without hover", async ({browser}) => {

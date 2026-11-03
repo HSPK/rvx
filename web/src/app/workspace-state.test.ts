@@ -50,6 +50,10 @@ describe("workspace identity and persistence truth", () => {
     expect(layoutSignature(first)).toBe(layoutSignature(second));
     panel.query.filters = [{path: "/name", op: "eq", value: ""}];
     expect(layoutSignature(first)).not.toBe(layoutSignature(second));
+    panel.query = {filterGroups: []};
+    expect(layoutSignature(first)).toBe(layoutSignature(second));
+    panel.query.filterGroups = [{id: "queue", name: "Queue", path: "/queue", display: "select", options: [{label: "B01", value: "b01"}]}];
+    expect(layoutSignature(first)).not.toBe(layoutSignature(second));
   });
   it("accepts only the submitted snapshot when the user keeps editing during a save", () => {
     const state = new WorkspaceState(), current = layout(), submitted = saved();

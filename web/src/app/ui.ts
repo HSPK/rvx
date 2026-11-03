@@ -88,9 +88,10 @@ export function field(label: string, input: HTMLElement): HTMLLabelElement {
   return wrapper;
 }
 /** Present empty and failure states with an optional direct recovery action. */
-export function message(title: string, description: string, action?: HTMLElement): HTMLElement {
+export function message(title: string, description = "", action?: HTMLElement): HTMLElement {
   const node = el("div", "empty-state");
-  node.append(el("h2", "", title), el("p", "muted", description));
+  node.append(el("h2", "", title));
+  if (description) node.append(el("p", "muted", description));
   if (action) node.append(action);
   return node;
 }

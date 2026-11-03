@@ -12,7 +12,13 @@ export interface ChartPresentation {
   yMin?: number;
   yMax?: number;
 }
-export interface ChartSpec {path: string; paths?: string[]; size: "normal" | "wide"; presentation?: ChartPresentation}
+export type PanelSize = "normal" | "quarter" | "third" | "half" | "two-thirds" | "three-quarters" | "wide";
+export const panelWidthChoices: [PanelSize, string][] = [
+  ["normal", "Normal"], ["quarter", "1/4"], ["third", "1/3"], ["half", "1/2"],
+  ["two-thirds", "2/3"], ["three-quarters", "3/4"], ["wide", "Wide"],
+];
+export function validPanelSize(value: unknown): value is PanelSize {return panelWidthChoices.some(([size]) => size === value);}
+export interface ChartSpec {path: string; paths?: string[]; size: PanelSize; presentation?: ChartPresentation}
 export interface RangeState {axis: string; window: string; from?: number; to?: number; timeFormat?: TimeAxisFormat}
 export const timeWindowChoices: [string, string][] = [
   ["900", "15m"], ["3600", "1h"], ["21600", "6h"], ["86400", "24h"],
@@ -28,7 +34,7 @@ export function copyChart(spec: ChartSpec): ChartSpec {
 
 /** Validate only supported display settings; old current-format path/size records remain valid. */
 export function validChartSpec(value: unknown): value is ChartSpec {
-  if (!isRecord(value) || typeof value.path !== "string" || !value.path.startsWith("/") || (value.size !== "normal" && value.size !== "wide")) return false;
+  if (!isRecord(value) || typeof value.path !== "string" || !value.path.startsWith("/") || !validPanelSize(value.size)) return false;
   if (value.paths !== undefined && (!Array.isArray(value.paths) || !value.paths.length || value.paths.length > 64 || !value.paths.every(path => typeof path === "string" && path.startsWith("/")) || new Set(value.paths).size !== value.paths.length || !value.paths.includes(value.path))) return false;
   if (value.presentation === undefined) return true;
   const display = value.presentation;

@@ -6,12 +6,16 @@ import {chartPanel, emptyLayout} from "./panels";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("typed chart presentation", () => {
-  const spec: ChartSpec = {path: "/loss", size: "wide", presentation: {title: "Policy objective", style: "area", lineWidth: 2.5, points: true, legend: "show", yMin: -1, yMax: 5}};
+  const spec: ChartSpec = {path: "/loss", size: "two-thirds", presentation: {title: "Policy objective", style: "area", lineWidth: 2.5, points: true, legend: "show", yMin: -1, yMax: 5}};
   it("accepts current flat sets both with and without optional presentation fields", () => {
     expect(validChartSpec({path: "/loss", size: "normal"})).toBe(true);
     expect(validChartSpec(spec)).toBe(true);
     expect(validChartSpec({...spec, presentation: {yMin: 0}})).toBe(true);
     expect(validChartSpec({...spec, presentation: {yMax: 0, points: false, legend: "auto"}})).toBe(true);
+    for (const size of ["normal", "wide", "quarter", "third", "half", "two-thirds", "three-quarters"]) {
+      expect(validChartSpec({...spec, size})).toBe(true);
+    }
+    for (const size of ["full", "1/2", 50, null]) expect(validChartSpec({...spec, size})).toBe(false);
   });
   it.each([
     {style: "smoothed"}, {lineWidth: 0}, {lineWidth: Infinity}, {points: "yes"}, {legend: ["auto"]},

@@ -68,7 +68,11 @@ test("table column visibility, order and resize persist, with sticky key/header 
   await table.getByRole("button", {name: "Columns", exact: true}).click();
   const columns = page.getByRole("dialog", {name: "Columns", exact: true});
   await columns.getByRole("checkbox", {name: "Show healthy", exact: true}).uncheck();
-  await columns.getByRole("button", {name: "Move load column left"}).click();
+  const loadHandle = columns.getByRole("button", {name: "Reorder load column", exact: true});
+  const nameRow = columns.locator(".column-option").filter({has: page.getByRole("checkbox", {name: "Show name", exact: true})});
+  const start = (await loadHandle.boundingBox())!, target = (await nameRow.boundingBox())!;
+  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2); await page.mouse.down();
+  await page.mouse.move(target.x + 15, target.y + 5, {steps: 6}); await page.mouse.up();
   await columns.getByRole("button", {name: "Close", exact: true}).click();
   await expect(table.locator('th[data-column="/healthy"]')).toHaveCount(0);
   const order = await table.locator("thead th[data-column]").evaluateAll(headers => headers.map(header => (header as HTMLElement).dataset.column));

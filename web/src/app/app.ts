@@ -17,7 +17,8 @@ type NoticeKind = "preferences" | "metadata" | "authentication" | "updates";
 /** Own one shared run selection, URL state, selector, and chart workspace. */
 export class App {
   private reads = new MetricCatalogQueryCoordinator();
-  private globalNotice = el("div", "workspace-notice preferences-notice connection-notice");
+  private globalNotice = el("div", "workspace-notice preferences-notice");
+  private notifications = el("section", "notification-region");
   private notices = new Map<NoticeKind, string>();
   private preferences = new PreferencesStore(message => this.showNotice(message), () => {
     if (this.themeControl) this.applyTheme(this.themeControl);
@@ -64,7 +65,6 @@ export class App {
     this.themeControl = theme;
     this.applyTheme(theme);
     const connectionHost = el("div", "connection-host");
-    connectionHost.append(this.globalNotice);
     const actions = el("div", "app-global-actions"); actions.append(theme);
     if (this.authentication) {
       this.signOutControl = iconButton("Sign out", "logout", () => {
@@ -75,14 +75,16 @@ export class App {
     }
     bar.append(brand, this.workspaceHeader, connectionHost, actions);
     this.globalNotice.setAttribute("role", "status"); this.globalNotice.hidden = !this.globalNotice.textContent;
-    this.root.replaceChildren(bar, this.main);
+    this.notifications.setAttribute("aria-label", "Notifications");
+    this.notifications.append(this.globalNotice);
+    this.root.replaceChildren(bar, this.main, this.notifications);
     window.addEventListener("popstate", () => this.restoreUrl(), {signal: this.lifetime.signal});
     this.mobile.addEventListener("change", () => {
       if (!this.mobile.matches) this.sheet?.close();
       this.selector?.setActive(!this.mobile.matches || Boolean(this.sheet));
     }, {signal: this.lifetime.signal});
     window.addEventListener("pagehide", event => {if (!event.persisted) this.destroy();}, {signal: this.lifetime.signal});
-    this.main.replaceChildren(message("Loading workspace settings", "Connecting to the server…"));
+    this.main.replaceChildren(message("Loading workspace…"));
     await this.preferences.bootstrap();
     if (this.lifetime.signal.aborted) return;
     this.startConnection(connectionHost);
@@ -117,11 +119,8 @@ export class App {
     const text = this.notices.get(kind);
     this.globalNotice.hidden = text === undefined;
     if (text !== undefined) {
-      const label = el("span", "connection-notice-label", kind === "authentication" ? "Sign-out failed"
-        : kind === "metadata" ? "Runs unavailable" : kind === "updates" ? "Updates unavailable"
-          : this.preferences.errorKind === "workspace" ? "Save failed" : this.preferences.error ? "Settings unavailable" : "Settings notice");
-      label.setAttribute("aria-hidden", "true"); this.globalNotice.title = text;
-      this.globalNotice.replaceChildren(label, el("span", "sr-only", text));
+      this.globalNotice.title = text;
+      this.globalNotice.replaceChildren(el("span", "notification-message", text));
       if (kind === "metadata" || kind === "updates" || kind === "preferences" && this.preferences.error) this.globalNotice.append(iconButton("Retry", "refresh", () => {
         if (kind === "metadata") {void this.loadMetadata(); return;}
         if (kind === "updates") {this.workspace?.refreshNow(); return;}
@@ -179,7 +178,7 @@ export class App {
     const request = new AbortController(); this.metadataRequest = request;
     this.selector?.setRefreshing(true);
     this.workspace?.setMetadataRefreshing(true);
-    if (!this.workspace) this.main.replaceChildren(message("Loading runs", "Connecting to your experiment history…"));
+    if (!this.workspace) this.main.replaceChildren(message("Loading runs…"));
     try {
       const [projects, experiments, runs] = await Promise.all([
         this.reads.api.projects(request.signal), this.reads.api.experiments(request.signal), this.reads.api.runs(request.signal),
@@ -209,7 +208,7 @@ export class App {
     if (route.kind === "missing") {
       this.destroyAnalysis();
       document.title = "Page not found · RVX";
-      this.main.replaceChildren(message("Page not found", "Analysis lives in one workspace.", button("Open workspace", () => {
+      this.main.replaceChildren(message("Page not found", "", button("Open workspace", () => {
         history.pushState(null, "", "/rvx"); this.restoreUrl();
       })));
       return;
@@ -235,6 +234,7 @@ export class App {
       this.workspace = new ChartWorkspace(this.runIds, this.metadata, this.reads, this.preferences, this.range, id => this.colors.get(id), run => this.runLabel(run),
         () => this.openRuns(), id => this.toggleRun(id), range => {this.range = {...range}; this.writeUrl(false);},
         () => {void this.loadMetadata();}, id => this.openRunDetails(id), id => this.openRunColor(id),
+        this.notifications,
         text => {if (text === null) this.clearNotice("updates"); else this.showNotice(text, "updates");});
       this.resize?.destroy();
       this.resize = new SidebarResize(this.layout, this.preferences.data.sidebar_width, sidebar_width => this.preferences.updateBrowser({sidebar_width}));
@@ -334,5 +334,6 @@ export class App {
   /** Stop all subscriptions and reads when the application is actually unloaded. */
   destroy(): void {
     this.colorDialog?.close(); this.destroyAnalysis(); this.resize?.destroy(); this.connection?.destroy(); this.preferences.destroy(); this.reads.destroy(); this.metadataRequest?.abort(); this.lifetime.abort();
+    this.notifications.remove();
   }
 }

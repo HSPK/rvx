@@ -5,7 +5,7 @@ import type {ExperimentRun} from "../domain/types";
 import {ChartRenderer} from "./chart";
 import type {MetricCatalogQueryCoordinator} from "./coordinator";
 import {matchingMetrics, metricEntries} from "./metric-catalog";
-import {axisLabel, chartPaths, compatibleMetrics, copyChart, humanize, isAmbiguous, metricName, rangeBounds, reporters, validChartSpec, type ChartPresentation, type ChartSpec, type RangeState} from "./model";
+import {axisLabel, chartPaths, compatibleMetrics, copyChart, humanize, isAmbiguous, metricName, panelWidthChoices, rangeBounds, reporters, validChartSpec, validPanelSize, type ChartPresentation, type ChartSpec, type RangeState} from "./model";
 import {copyPanel, isSnapshotVisual, panelLimit, sectionLimit, type PanelSpec, type SectionSpec, type TablePanelSpec, type ColumnPreference, type TableQueryPreference} from "./panels";
 import {TablePanel} from "./table-panel";
 import {SnapshotVisualPanel} from "./snapshot-visual/panel";
@@ -34,8 +34,9 @@ export class AddEditor {
   private count = el("span", "metric-selection-count muted");
   private error = el("p", "editor-error error-text");
   private settings = el("div", "presentation-settings");
+  private appearance = el("details", "editor-appearance");
+  private chartSettings = el("div", "appearance-settings");
   private sourceChoices = el("fieldset", "reporter-choices");
-  private chartFields: HTMLElement[] = [];
   private primary: HTMLButtonElement;
   private clearControl: HTMLButtonElement;
   private mode: AddKind = "chart";
@@ -95,8 +96,8 @@ export class AddEditor {
     this.styleInput = select("Presentation", [["line", "Line"], ["area", "Area"]], this.display.style ?? "line", changed);
     this.pointsInput = select("Points", [["auto", "Automatic"], ["show", "Show"], ["hide", "Hide"]], this.display.points === undefined ? "auto" : this.display.points ? "show" : "hide", changed);
     this.legendInput = select("Legend", [["auto", "Automatic"], ["show", "Show"], ["hide", "Hide"]], this.display.legend ?? "auto", changed);
-    this.sizeInput = select("Panel width", [["normal", "Normal"], ["wide", "Wide"]], existing?.size ?? "normal", changed);
-    this.titleInput.setAttribute("aria-label", "Panel title"); this.titleInput.maxLength = 120;
+    this.sizeInput = select("Panel width", panelWidthChoices, existing?.size ?? "normal", changed);
+    this.titleInput.setAttribute("aria-label", "Panel title"); this.titleInput.maxLength = 120; this.titleInput.placeholder = "Automatic";
     this.titleInput.value = existing?.kind === "chart" ? existing.presentation?.title ?? "" : existing?.title ?? "";
     this.widthInput.type = "number"; this.widthInput.min = ".5"; this.widthInput.max = "6"; this.widthInput.step = ".1"; this.widthInput.value = String(this.display.lineWidth ?? 1.8); this.widthInput.setAttribute("aria-label", "Line width");
     for (const [input, label, value] of [[this.yMinInput, "Y minimum", this.display.yMin], [this.yMaxInput, "Y maximum", this.display.yMax]] as const) {
@@ -104,10 +105,12 @@ export class AddEditor {
     }
     for (const input of [this.titleInput, this.widthInput, this.yMinInput, this.yMaxInput]) input.addEventListener("input", changed);
     for (const [label, input, area] of [["Title", this.titleInput, "title"], ["Presentation", this.styleInput, "style"], ["Line width", this.widthInput, "line"], ["Points", this.pointsInput, "points"], ["Legend", this.legendInput, "legend"], ["Width", this.sizeInput, "width"], ["Y minimum", this.yMinInput, "ymin"], ["Y maximum", this.yMaxInput, "ymax"]] as const) {
-      const wrapper = field(label, input); wrapper.style.gridArea = area; this.settings.append(wrapper);
-      if (!["title", "width"].includes(area)) this.chartFields.push(wrapper);
+      const wrapper = field(label, input); wrapper.style.gridArea = area;
+      (["title", "width"].includes(area) ? this.settings : this.chartSettings).append(wrapper);
     }
-    right.append(this.bindings.tabs, this.previewHost, this.settings, this.bindings.element, this.sourceChoices);
+    this.appearance.append(el("summary", "", "Appearance"), this.chartSettings);
+    this.appearance.open = existing?.kind === "chart" && Object.keys(existing.presentation ?? {}).some(key => key !== "title");
+    right.append(this.bindings.tabs, this.previewHost, this.settings, this.appearance, this.bindings.element, this.sourceChoices);
     this.panes.append(left, right);
     const footer = el("footer", "editor-actions"); this.error.setAttribute("role", "alert");
     this.primary = button(existing ? "Save changes" : "Add", () => this.save(), "button primary");
@@ -178,11 +181,12 @@ export class AddEditor {
     this.clearControl.hidden = snapshot || section;
     this.layoutInput.hidden = !chart; this.sectionInput.hidden = section || this.context.sections.length === 1;
     this.modeSettings.hidden = this.layoutInput.hidden && this.sectionInput.hidden;
-    this.settings.hidden = false; this.chartFields.forEach(field => {field.hidden = !chart;});
+    this.settings.hidden = false; this.appearance.hidden = !chart;
     this.settings.classList.toggle("collection-settings", !chart);
     this.bindings.tabs.hidden = !snapshot; this.bindings.element.hidden = !snapshot || !this.bindings.value;
     this.sourceChoices.hidden = chart || section;
     this.titleInput.maxLength = section ? 100 : 120;
+    this.titleInput.placeholder = section ? "Section name" : "Automatic";
     this.search.placeholder = snapshot ? "Search collections…" : "Search metrics…";
     this.search.setAttribute("aria-label", snapshot ? "Search collections" : "Search metrics");
     if (!this.context.existing && !chart) this.sizeInput.value = "wide";
@@ -197,8 +201,6 @@ export class AddEditor {
     const mode = this.mode;
     if (mode === "section") {
       this.count.hidden = true;
-      this.count.textContent = "New section";
-      this.results.append(el("p", "editor-list-note muted", "A section groups panels in this workspace. Deleting it later will not delete its panels."));
       return;
     }
     if (mode === "snapshot-table") {
@@ -246,8 +248,9 @@ export class AddEditor {
         this.previewPath = entry.metric.path; this.renderList(); this.updateDisplay(); void this.loadPreview();
       });
       const preview = button("", () => {this.previewPath = entry.metric.path; this.renderList(); void this.loadPreview();}, "metric-preview-option");
-      preview.title = entry.metric.path; preview.setAttribute("aria-label", `Preview ${entry.name}`);
-      preview.querySelector("span")!.append(el("strong", "", entry.name), el("small", "muted", [entry.metric.unit, isAmbiguous(entry.metric) ? "Separate reporter traces" : null].filter(Boolean).join(" · ")));
+      preview.title = `${entry.metric.path}${isAmbiguous(entry.metric) ? " · Separate reporter traces" : ""}`; preview.setAttribute("aria-label", `Preview ${entry.name}`);
+      preview.querySelector("span")!.append(el("strong", "", entry.name));
+      if (entry.metric.unit) preview.querySelector("span")!.append(el("small", "metric-option-unit muted", entry.metric.unit));
       if (entry.context) preview.querySelector("span")!.append(el("small", "metric-context muted", entry.context));
       row.append(check, preview); this.results.append(row);
     }
@@ -276,13 +279,13 @@ export class AddEditor {
   }
   /** Build a display-only chart record; the containing panel receives its independent identity on commit. */
   private chartSpec(paths: string[]): ChartSpec {
-    return {path: paths[0] ?? "", ...(paths.length > 1 ? {paths} : {}), size: this.sizeInput.value === "wide" ? "wide" : "normal",
+    return {path: paths[0] ?? "", ...(paths.length > 1 ? {paths} : {}), size: validPanelSize(this.sizeInput.value) ? this.sizeInput.value : "normal",
       ...(Object.keys(this.display).length ? {presentation: {...this.display}} : {})};
   }
   /** Construct a copied table draft with reporter and column configuration but no persisted snapshot pins. */
   private tableSpec(): TablePanelSpec {
     const existing = this.context.existing;
-    const base = {id: existing?.id ?? "preview", sectionId: this.sectionInput.value, size: this.sizeInput.value === "wide" ? "wide" as const : "normal" as const,
+    const base = {id: existing?.id ?? "preview", sectionId: this.sectionInput.value, size: validPanelSize(this.sizeInput.value) ? this.sizeInput.value : "normal" as const,
       ...(this.titleInput.value.trim() ? {title: this.titleInput.value.trim()} : {}), ...(this.sourceIds ? {sourceIds: [...this.sourceIds]} : {}),
       ...this.tableDraft};
     const view = this.bindings.value;
@@ -300,7 +303,7 @@ export class AddEditor {
   private async loadPreview(): Promise<void> {
     if (this.lifetime.signal.aborted || document.hidden) return;
     this.request?.abort();
-    if (this.mode === "section") {this.previewHost.replaceChildren(el("h3", "", this.titleInput.value.trim() || "Untitled section"), el("p", "muted", "Panels can be dragged into this group.")); return;}
+    if (this.mode === "section") {this.previewHost.replaceChildren(el("h3", "", this.titleInput.value.trim() || "Untitled section")); return;}
     if (!this.context.runs.length) {this.previewHost.textContent = "Select runs to preview recorded data."; return;}
     if (this.mode !== "chart") {
       if (this.mode === "snapshot-table" && this.collectionPath === null || this.mode === "metric-table" && !this.selection.size) {
@@ -413,7 +416,7 @@ export class AddEditor {
   private save(): void {
     if (!this.updateDisplay()) return;
     if (this.mode === "section") {this.commit({kind: "section", name: this.titleInput.value.trim()}); this.modal.close(); return;}
-    const base = {sectionId: this.sectionInput.value, size: this.sizeInput.value === "wide" ? "wide" as const : "normal" as const};
+    const base = {sectionId: this.sectionInput.value, size: validPanelSize(this.sizeInput.value) ? this.sizeInput.value : "normal" as const};
     let panels: PanelSpec[];
     if (this.mode === "chart") {
       const groups = this.layoutInput.value === "combined" ? [[...this.selection]] : [...this.selection].map(path => [path]);

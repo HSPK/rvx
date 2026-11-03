@@ -57,12 +57,17 @@ export class PanelLayout {
         const view = views.get(panel.id);
         if (!view) continue;
         view.element.dataset.panelId = panel.id; view.element.dataset.sectionId = spec.id;
+        view.element.dataset.panelSize = panel.size;
         if (!this.handles.has(panel.id)) this.bindHandle(panel.id, view);
         if (this.expanded?.id === panel.id) continue;
         const at = grid.children[position];
         if (at !== view.element) grid.insertBefore(view.element, at ?? null);
       }
-      if (!panels.length) grid.append(el("div", "section-empty muted", "Drop panels here, or use Add."));
+      if (!panels.length) {
+        const empty = el("div", "section-empty");
+        empty.title = "Drop panels here";
+        empty.append(button("Add panel", () => this.add(spec.id), "button quiet", "plus")); grid.append(empty);
+      }
       const at = this.element.children[index + 1];
       if (at !== section) this.element.insertBefore(section, at ?? null);
     }
@@ -91,6 +96,7 @@ export class PanelLayout {
     if (!view) return;
     this.cancelDrag();
     const placeholder = el("div", "panel-placeholder");
+    placeholder.dataset.panelSize = view.element.dataset.panelSize;
     const box = view.element.getBoundingClientRect();
     placeholder.style.height = `${box.height}px`; placeholder.classList.toggle("wide", view.element.classList.contains("wide"));
     view.element.before(placeholder);
@@ -115,9 +121,11 @@ export class PanelLayout {
     this.editor?.close();
     const modal = dialog("Section", "", () => {this.editor = null;}); this.editor = modal;
     const name = el("input", "text-input"); name.value = section.name; name.maxLength = 100; name.setAttribute("aria-label", "Section name");
-    modal.body.append(field("Name", name), el("p", "muted", "Deleting a section moves its panels into another section; no panels are deleted."),
-      button("Save", () => {section.name = name.value.trim(); modal.close(); this.changed();}, "button primary"),
-      button("Delete section", () => {removeSection(this.state(), id); modal.close(); this.changed(); this.visibilityChanged();}, "button quiet"));
+    const actions = el("footer", "section-editor-actions");
+    const remove = button("Delete section", () => {removeSection(this.state(), id); modal.close(); this.changed(); this.visibilityChanged();}, "button quiet");
+    remove.title = "Remove this section and keep its panels";
+    actions.append(remove, button("Save", () => {section.name = name.value.trim(); modal.close(); this.changed();}, "button primary"));
+    modal.body.append(field("Name", name), actions);
     name.focus();
   }
   /** Restrict dragging to the explicit handle so plot zoom and table resizing retain their own gestures. */

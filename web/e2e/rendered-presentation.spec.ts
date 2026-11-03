@@ -83,6 +83,9 @@ async function openLossEditor(page: Page): Promise<Locator> {
   await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
   const editor = page.getByRole("dialog", {name: "Edit panel", exact: true});
   await expect(editor.locator(".chart-preview canvas")).toBeVisible();
+  if (!await editor.locator(".editor-appearance").evaluate(node => (node as HTMLDetailsElement).open)) {
+    await editor.getByText("Appearance", {exact: true}).click();
+  }
   return editor;
 }
 

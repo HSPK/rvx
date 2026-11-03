@@ -9,8 +9,8 @@ export function layoutSignature(layout: WorkspaceLayout): string {
     if (!panel.title) delete panel.title;
     panel.sourceIds?.sort();
     if (panel.query) {
-      const {search, filters, sort} = panel.query;
-      panel.query = {...(search ? {search} : {}), ...(filters?.length ? {filters} : {}), ...(sort ? {sort} : {})};
+      const {search, filters, filterGroups, sort} = panel.query;
+      panel.query = {...(search ? {search} : {}), ...(filters?.length ? {filters} : {}), ...(filterGroups?.length ? {filterGroups} : {}), ...(sort ? {sort} : {})};
       if (!Object.keys(panel.query).length) delete panel.query;
     }
   }
