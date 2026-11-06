@@ -1,5 +1,5 @@
 import {test, expect} from "@playwright/test";
-import {exactId, mockApi, selectedObservation} from "./fixtures";
+import {exactId, mockApi, selectedObservation, openRunManagement} from "./fixtures";
 
 test.use({viewport: {width: 390, height: 844}, isMobile: true, hasTouch: true});
 
@@ -17,15 +17,15 @@ test("touch taps select a real observation and preserve native Run comparison", 
   expect(id).toMatch(/^\d+$/);
   await expect(chart.locator(".chart-zoom-state")).toBeHidden();
   await expect(chart.getByRole("tooltip")).toBeVisible();
-  await page.locator(".run-chip").getByRole("button", {name: /^Run details/}).tap();
+  await openRunManagement(page);
+  await page.locator(".runs-dock").getByRole("button", {name: /^Run details/}).first().tap();
   const drawer = page.getByRole("dialog", {name: "Run details", exact: true});
   await expect(drawer.getByRole("heading", {name: "Configuration", exact: true})).toBeVisible();
   expect(requests.some(request => /^\/api\/snapshots\/\d+$/.test(request.path))).toBe(false);
   await drawer.getByRole("button", {name: "Close", exact: true}).tap();
-  await page.getByRole("button", {name: "Select runs (1 selected)"}).tap();
-  const sheet = page.getByRole("dialog", {name: "Runs", exact: true});
+  const sheet = page.locator(".runs-dock");
   await sheet.getByRole("checkbox", {name: "Select grpo · baseline"}).tap();
-  await sheet.getByRole("button", {name: "Close", exact: true}).tap();
+  await sheet.getByRole("button", {name: "Manage runs", exact: true}).tap();
   await expect(chart.locator(".legend-item")).toHaveCount(2);
   expect(await original!.evaluate(node => node.isConnected)).toBe(true);
   await page.screenshot({path: "artifacts/touch-native-comparison.png"});
@@ -46,7 +46,7 @@ test("vertical swipes scroll only the chart region without creating a zoom", asy
     await page.waitForTimeout(20);
   }
   await session.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
-  await expect.poll(() => page.locator(".chart-scroll").evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  await expect.poll(() => page.locator(".app-content").evaluate(node => node.scrollTop)).toBeGreaterThan(0);
   expect(await page.evaluate(() => scrollY)).toBe(0);
   await expect(chart.locator(".chart-zoom-state")).toBeHidden();
   await expect(chart.getByRole("tooltip")).toBeHidden();

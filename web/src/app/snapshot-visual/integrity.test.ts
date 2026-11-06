@@ -1,6 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {cellText, finiteNumber} from "./details";
-import {gridGeometry, statusTotals} from "./status";
+import {cellText, finiteNumber, gridGeometry, statusTotals} from "./react-model";
 import type {SnapshotAggregateResponse} from "../../domain/snapshot-views";
 
 describe("snapshot visual frame integrity", () => {

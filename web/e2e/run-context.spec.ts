@@ -1,5 +1,6 @@
+import {selectOption} from "./react-controls";
 import {test, expect} from "@playwright/test";
-import {mockApi, runs, firstObservation} from "./fixtures";
+import {mockApi, runs, firstObservation, openRunDetails} from "./fixtures";
 
 test("same-name Runs remain distinguishable across selection, charts and Run details", async ({page}) => {
   await mockApi(page);
@@ -13,10 +14,10 @@ test("same-name Runs remain distinguishable across selection, charts and Run det
   await expect(page.getByRole("checkbox", {name: "Select PPO research / seed-0", exact: true})).toBeChecked();
   await expect(chart.locator(".chart-legend")).toContainText("GRPO research / seed-0");
   await expect(chart.locator(".chart-legend")).toContainText("PPO research / seed-0");
-  await page.getByRole("combobox", {name: "Experiment", exact: true}).selectOption("experiment-1");
+  await selectOption(page.getByRole("combobox", {name: "Experiment", exact: true}), "experiment-1");
   await expect(page.getByRole("checkbox", {name: "Select GRPO research / seed-0", exact: true})).toBeChecked();
-  await expect(page.locator('.run-chip[data-run-id="run-3"]')).toContainText("PPO research / seed-0");
-  await page.locator('.run-chip[data-run-id="run-3"]').getByRole("button", {name: /^Run details/}).click();
+  await expect(page.locator('.run-row[data-run-id="run-3"]')).toContainText("PPO research / seed-0");
+  await openRunDetails(page, "run-3");
   await expect(page.getByRole("dialog", {name: "Run details", exact: true}).locator(".run-detail-name")).toHaveText("PPO research / seed-0");
 });
 
@@ -42,10 +43,10 @@ test("a fresh finished Run cannot hide another running Run's old observations", 
   await mockApi(page, {observationOrigins: {"run-1": now - span - 600e9, "run-2": now - span}});
   await page.goto("/rvx?runs=run-1,run-2&live=0");
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
-  await expect(page.locator('.run-chip[data-run-id="run-1"]')).toContainText("No recent data");
-  await expect(page.locator('.run-chip[data-run-id="run-2"]')).not.toContainText("No recent data");
+  await expect(page.locator('.run-row[data-run-id="run-1"]')).toContainText("No recent data");
+  await expect(page.locator('.run-row[data-run-id="run-2"]')).not.toContainText("No recent data");
   await expect(page.locator(".collection-freshness")).toContainText("Updated");
-  await expect(page.locator(".chip-state.stale-text")).toHaveCount(1);
+  await expect(page.locator(".run-observation.stale-text")).toHaveCount(1);
   await page.screenshot({path: "artifacts/individual-run-freshness.png"});
 });
 
@@ -54,9 +55,9 @@ test("legacy paused links still show honest staleness as the wall clock advances
   await mockApi(page, {observationOrigins: {"run-1": now - 179 * 60e9}});
   await page.goto("/rvx?runs=run-1&live=0");
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
-  const chip = page.locator('.run-chip[data-run-id="run-1"]');
+  const chip = page.locator('.run-row[data-run-id="run-1"]');
   await expect(chip).not.toContainText("No recent data");
   await page.evaluate(() => {const future = Date.now() + 600_000; Date.now = () => future;});
-  await page.getByRole("combobox", {name: "Project", exact: true}).selectOption("project-1");
+  await selectOption(page.getByRole("combobox", {name: "Project", exact: true}), "project-1");
   await expect(chip).toContainText("No recent data");
 });

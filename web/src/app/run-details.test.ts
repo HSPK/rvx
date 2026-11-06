@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
-import {configurationPreview} from "./run-details";
+import {configurationPreview} from "./run-configuration";
 
 afterEach(() => vi.unstubAllGlobals());
 

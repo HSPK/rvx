@@ -71,6 +71,14 @@ export function snapshotViewError(view: SnapshotView): string {
   }
   return validSnapshotView(view) ? "" : "Choose valid snapshot display settings.";
 }
+/** Array positions cannot provide stable task identity even when a saved key mapping is valid JSON. */
+export function snapshotBindingError(view: SnapshotView | undefined, table: TableDefinition | null): string {
+  if (!view) return "";
+  if (view.type === "status-grid" && view.idPaths.includes("$key") && table?.collection_kinds?.includes("array")) {
+    return "Choose stable task fields; array positions are not task identities.";
+  }
+  return snapshotViewError(view);
+}
 /** Field types are bounded discovery hints; unknown columns remain selectable for explicit binding. */
 export function numericSnapshotFields(columns: TableColumn[]): TableColumn[] {
   return columns.filter(column => column.path !== "$key" && (!column.kinds?.length || column.kinds.includes("number")));
@@ -95,4 +103,12 @@ export function suggestSnapshotViews(table: TableDefinition | null): {bar: Snaps
     status: {type: "status-grid", idPaths, statusPath: choose(["/status", "/state", "/phase"]) ?? unsetSnapshotField,
       ...(labelPath ? {labelPath} : {}), ...(groupPath ? {groupPath} : {}), ...(value ? {valuePath: value} : {}), density: "comfortable"},
   };
+}
+
+/** Preserve saved mappings while initializing the alternate view from the discovered collection. */
+export function snapshotEditorViews(table: TableDefinition | null, initial?: SnapshotView): {bar: SnapshotBarView; status: SnapshotStatusView} {
+  const views = suggestSnapshotViews(table);
+  if (initial?.type === "bar") views.bar = copySnapshotView(initial) as SnapshotBarView;
+  else if (initial?.type === "status-grid") views.status = copySnapshotView(initial) as SnapshotStatusView;
+  return views;
 }

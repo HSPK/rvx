@@ -1,4 +1,6 @@
 import {defineConfig} from "vite";
+import {fileURLToPath} from "node:url";
+import tailwindcss from "@tailwindcss/vite";
 
 /** Match the native login route before Vite's application fallback, including return-path queries. */
 function loginRoute(request, _response, next) {
@@ -7,7 +9,8 @@ function loginRoute(request, _response, next) {
 }
 
 export default defineConfig({
-  plugins: [{
+  resolve: {alias: {"@": fileURLToPath(new URL("./src", import.meta.url))}},
+  plugins: [tailwindcss(), {
     name: "rvx-login-route",
     configureServer(server) {server.middlewares.use(loginRoute);},
     configurePreviewServer(server) {server.middlewares.use(loginRoute);},

@@ -56,8 +56,15 @@ role's application state
         |
   chart catalog / numeric projection / exact observation / history / diff
         |
-  Rust HTTP API -> TypeScript workspace / Rust CLI and TUI
+  Rust HTTP API -> React/TypeScript workspace / Rust CLI and TUI
 ```
+
+The web workspace uses the Experiment Tracker frontend architecture:
+React and TypeScript with Vite, Tailwind, local shadcn-style Radix primitives,
+Lucide icons, and uPlot. React owns the workspace, Run selector, panels,
+editors, authentication, and overlays; uPlot instances follow component
+lifecycles rather than mounting legacy DOM controllers. RVX retains its
+snapshot APIs, exact observation provenance, and server-owned preferences.
 
 The producer owns capture validation, its Session, version assignment,
 retention, and HTTP lifetime. The consumer coordinator owns scheduling,

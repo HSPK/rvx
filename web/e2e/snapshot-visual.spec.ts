@@ -1,5 +1,6 @@
+import {expectControlValue, selectOption} from "./react-controls";
 import {test, expect, type Page} from "@playwright/test";
-import {firstObservation, mockApi, seedUiState, serverState} from "./fixtures";
+import {firstObservation, mockApi, seedUiState, serverState, setTheme} from "./fixtures";
 import type {SnapshotAggregateRequest, SnapshotBarView, SnapshotRecordsRequest, SnapshotStatusView, SnapshotView} from "../src/domain/snapshot-views";
 import type {TableCell, TableDataRow, TableRowsRequest, TableSource} from "../src/domain/tables";
 import type {SnapshotVisualPanelSpec} from "../src/app/panels";
@@ -140,7 +141,7 @@ test("snapshot visual toolbar groups share AND filters between records and full 
   await expect(card).toHaveAttribute("data-loaded", "true");
   await card.getByRole("radio", {name: "Running", exact: true}).check();
   await expect.poll(() => fixture.calls.aggregate.at(-1)?.filters).toEqual([{path: "/status", op: "eq", value: "Running"}]);
-  await card.getByRole("combobox", {name: "Queue", exact: true}).selectOption("Primary queue");
+  await selectOption(card.getByRole("combobox", {name: "Queue", exact: true}), "Primary queue");
   const expected = [{path: "/status", op: "eq", value: "Running"}, {path: "/queue", op: "eq", value: "Primary queue"}];
   await expect.poll(() => fixture.calls.aggregate.at(-1)?.filters).toEqual(expected);
   expect(fixture.calls.records.at(-1)?.filters).toEqual(expected);
@@ -162,7 +163,7 @@ test("status hover preserves state colors and workload times are readable in hov
   const first = card.locator(".sv-task-cell").first();
   const before = await first.evaluate(node => ({color: getComputedStyle(node).backgroundColor, size: node.getBoundingClientRect().width}));
   await first.hover();
-  await expect(card.getByRole("tooltip")).toContainText("1h 1m 1s");
+  await expect(page.getByRole("tooltip")).toContainText("1h 1m 1s");
   expect(await first.evaluate(node => ({color: getComputedStyle(node).backgroundColor, size: node.getBoundingClientRect().width}))).toEqual(before);
   await expect(first).toHaveCSS("filter", "none");
   await expect(first).toHaveCSS("outline-style", "solid");
@@ -187,20 +188,20 @@ test("status hover clears in cell gaps and after the final task, with space for 
   const viewport = (await card.locator(".sv-status-viewport").boundingBox())!;
   const box = (await first.boundingBox())!;
   expect(box.x - viewport.x).toBeGreaterThanOrEqual(2);
-  await expect(card.getByRole("tooltip")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toBeVisible();
   await page.mouse.move(box.x + box.width + 2, box.y + box.height / 2);
-  await expect(card.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   await cells.last().hover();
-  await expect(card.getByRole("tooltip")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toBeVisible();
   const final = (await cells.last().boundingBox())!;
   await page.mouse.move(final.x + final.width + 3, final.y + final.height / 2);
-  await expect(card.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   await first.focus();
-  await expect(card.getByRole("tooltip")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toBeVisible();
   await page.keyboard.press("ArrowRight");
-  await expect(card.getByRole("tooltip")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(card.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
 });
 
 for (const total of [9, 1000]) {
@@ -312,9 +313,9 @@ test("bars retain native mixed-Source values, exact labels, negative stacks and 
   await expect(negative).toHaveAttribute("data-start", "0");
   await expect(card.locator('rect[data-run="run-2"][data-field="m0"]')).toHaveAttribute("data-start", "0");
   const exact = card.locator(".sv-bar-value").filter({hasText: "18446744073709551615"});
-  await exact.focus(); await expect(card.getByRole("tooltip")).toContainText("Reporter");
-  await expect(card.getByRole("tooltip")).toContainText("20000 counted");
-  await expect(card.getByRole("tooltip")).toContainText("18446744073709551615");
+  await exact.focus(); await expect(page.getByRole("tooltip")).toContainText("Reporter");
+  await expect(page.getByRole("tooltip")).toContainText("20000 counted");
+  await expect(page.getByRole("tooltip")).toContainText("18446744073709551615");
   await page.screenshot({path: "artifacts/snapshot-visual-bars-exact.png"});
   for (const width of [1200, 901, 600, 390]) {
     await page.setViewportSize({width, height: 900});
@@ -452,7 +453,7 @@ test("state colors save without reads; filters remain reusable; fullscreen retai
   await filters.getByRole("checkbox", {name: "Enable filter 1"}).uncheck();
   await expect.poll(() => fixture.calls.records.at(-1)?.filters).toEqual([]);
   await filters.getByRole("button", {name: "Close", exact: true}).click();
-  await card.locator(".menu-trigger").click(); await card.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await card.locator(".menu-trigger").click(); await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
   await expect(card).toHaveClass(/is-expanded/);
   expect(await original!.evaluate(node => node.isConnected && node.classList.contains("is-expanded"))).toBe(true);
   expect(await card.locator(".sv-task-cell").count()).toBeLessThanOrEqual(1800);
@@ -470,7 +471,7 @@ test("state colors save without reads; filters remain reusable; fullscreen retai
   console.log("snapshot visual measured pointer performance", performance);
   await page.screenshot({path: "artifacts/snapshot-visual-status-fullscreen.png"});
   await page.getByRole("dialog").filter({has: card}).getByRole("button", {name: "Close", exact: true}).click();
-  await card.locator(".menu-trigger").click(); await card.getByRole("menuitem", {name: "Remove snapshot", exact: true}).click();
+  await card.locator(".menu-trigger").click(); await page.getByRole("menuitem", {name: "Remove snapshot", exact: true}).click();
   await expect(card).toHaveCount(0);
   const calls = fixture.calls.records.length; await page.clock.fastForward(5100); expect(fixture.calls.records.length).toBe(calls);
   await expect(page.locator(".sv-tooltip")).toHaveCount(0);
@@ -543,7 +544,7 @@ test("grouped tasks prioritize group labels and reflow inside the viewport after
   await expect(card.locator(".sv-task-group").first()).toHaveText(/^queue: .+ · .+/);
   await expect(card.locator(".sv-task-group").first()).not.toContainText("Learner");
   await card.locator(".menu-trigger").click();
-  await card.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
   await expect(card).toHaveClass(/is-expanded/);
   await page.keyboard.press("Escape");
   await expect(card).not.toHaveClass(/is-expanded/);
@@ -564,7 +565,7 @@ test("grouped tasks prioritize group labels and reflow inside the viewport after
 });
 
 test("Arrange sorts complete task pages and persists responsive geometry without presentation-only reads", async ({page}) => {
-  const fixture = await visualFixture(page, statusView, {query: {sort: {path: "/extra", direction: "desc"}}});
+  const fixture = await visualFixture(page, statusView, {size: "wide", query: {sort: {path: "/extra", direction: "desc"}}});
   fixture.state.total = 2500; fixture.state.sourceCount = 1;
   await page.clock.install(); await page.goto("/rvx?runs=run-1");
   const card = page.locator(".snapshot-visual-card");
@@ -574,7 +575,7 @@ test("Arrange sorts complete task pages and persists responsive geometry without
   await card.getByRole("button", {name: "Arrange", exact: true}).click();
   const arrange = page.getByRole("dialog", {name: "Arrange tasks", exact: true});
   await expect(arrange.getByRole("combobox", {name: "Sort direction", exact: true})).toBeDisabled();
-  await arrange.getByRole("combobox", {name: "Sort by", exact: true}).selectOption("/value");
+  await selectOption(arrange.getByRole("combobox", {name: "Sort by", exact: true}), "/value");
   await expect.poll(firstIdentity).toBe("string:task-000001");
   expect(fixture.calls.records.at(-1)).toMatchObject({offset: 0, sort: {path: "/value", direction: "asc"}});
   await page.keyboard.press("Escape");
@@ -582,13 +583,13 @@ test("Arrange sorts complete task pages and persists responsive geometry without
   await expect(card.locator(".sv-summary")).toHaveText("1001–2000 / 2500 tasks");
   await expect.poll(firstIdentity).toBe("string:task-001001");
   await card.getByRole("button", {name: "Arrange", exact: true}).click();
-  await arrange.getByRole("combobox", {name: "Sort direction", exact: true}).selectOption("desc");
+  await selectOption(arrange.getByRole("combobox", {name: "Sort direction", exact: true}), "desc");
   await expect(card.locator(".sv-summary")).toHaveText("1–1000 / 2500 tasks");
   await expect.poll(firstIdentity).toBe("string:task-000000");
   expect(fixture.calls.records.at(-1)).toMatchObject({offset: 0, sort: {path: "/value", direction: "desc"}});
   const requests = [fixture.calls.records.length, fixture.calls.aggregate.length];
   for (const [name, value] of [["Columns", "12"], ["Cell size", "24"], ["Gap", "6"]]) {
-    await arrange.getByRole("combobox", {name, exact: true}).selectOption(value!);
+    await selectOption(arrange.getByRole("combobox", {name, exact: true}), value!);
   }
   await expect(card.locator(".sv-status-canvas")).toHaveAttribute("data-columns", "12");
   await expect(card.locator('[data-identity="string:task-000000"]')).toHaveCSS("width", "24px");
@@ -602,10 +603,10 @@ test("Arrange sorts complete task pages and persists responsive geometry without
     view: {sort: {path: "/value", direction: "desc"}, columns: 12, cellSize: 24, gap: 6}});
   await page.reload(); await expect(card).toHaveAttribute("data-loaded", "true");
   await card.getByRole("button", {name: "Arrange", exact: true}).click();
-  await expect(arrange.getByRole("combobox", {name: "Columns", exact: true})).toHaveValue("12");
-  await expect(arrange.getByRole("combobox", {name: "Sort direction", exact: true})).toHaveValue("desc");
+  await expectControlValue(arrange.getByRole("combobox", {name: "Columns", exact: true}), "12");
+  await expectControlValue(arrange.getByRole("combobox", {name: "Sort direction", exact: true}), "desc");
   await page.keyboard.press("Escape");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await page.setViewportSize({width: 390, height: 844});
   await card.scrollIntoViewIfNeeded();
   await expect.poll(() => card.evaluate(node => {
@@ -614,14 +615,14 @@ test("Arrange sorts complete task pages and persists responsive geometry without
     return cells.length > 0 && cells.every(cell => cell.getBoundingClientRect().right <= viewport.right + 1);
   })).toBe(true);
   await card.getByRole("button", {name: "Arrange", exact: true}).click();
-  await expect(arrange.getByRole("combobox", {name: "Columns", exact: true})).toHaveValue("12");
+  await expectControlValue(arrange.getByRole("combobox", {name: "Columns", exact: true}), "12");
   expect(await arrange.evaluate(node => node.getBoundingClientRect().right <= innerWidth)).toBe(true);
   await page.screenshot({path: "artifacts/snapshot-status-arrange-mobile-dark.png"});
-  await arrange.getByRole("combobox", {name: "Sort by", exact: true}).selectOption("__choose_snapshot_field__");
+  await selectOption(arrange.getByRole("combobox", {name: "Sort by", exact: true}), "__choose_snapshot_field__");
   await expect.poll(() => fixture.calls.records.at(-1)?.sort).toBeUndefined();
   await page.keyboard.press("Escape");
   await card.locator(".menu-trigger").click();
-  await card.getByRole("menuitem", {name: "Remove snapshot", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Remove snapshot", exact: true}).click();
   await expect(page.getByRole("dialog", {name: "Arrange tasks", exact: true})).toHaveCount(0);
 });
 
@@ -633,7 +634,7 @@ test("Shade by keeps status hues, uses a pinned full-scope range and preserves t
   await expect(card).toHaveAttribute("data-loaded", "true");
   await card.getByRole("button", {name: "Arrange", exact: true}).click();
   const arrange = page.getByRole("dialog", {name: "Arrange tasks", exact: true});
-  await arrange.getByRole("combobox", {name: "Shade by", exact: true}).selectOption("/extra");
+  await selectOption(arrange.getByRole("combobox", {name: "Shade by", exact: true}), "/extra");
   await expect(card.locator(".sv-shade-key")).toContainText("0 – 200");
   await expect(card.locator(".sv-shade-key")).toHaveAttribute("data-scale", "log");
   expect(fixture.calls.records.at(-1)?.columns).toContain("/extra");
@@ -650,16 +651,16 @@ test("Shade by keeps status hues, uses a pinned full-scope range and preserves t
   const requests = [fixture.calls.records.length, fixture.calls.aggregate.length];
   const size = card.locator('[data-identity="string:task-000010"]');
   const logShade = await size.evaluate(node => parseFloat(node.style.getPropertyValue("--sv-shade")));
-  await arrange.getByRole("combobox", {name: "Shade scale", exact: true}).selectOption("linear");
+  await selectOption(arrange.getByRole("combobox", {name: "Shade scale", exact: true}), "linear");
   const linearShade = await size.evaluate(node => parseFloat(node.style.getPropertyValue("--sv-shade")));
   expect(logShade - linearShade).toBeGreaterThan(25);
-  await arrange.getByRole("combobox", {name: "Shade scale", exact: true}).selectOption("log");
+  await selectOption(arrange.getByRole("combobox", {name: "Shade scale", exact: true}), "log");
   expect([fixture.calls.records.length, fixture.calls.aggregate.length]).toEqual(requests);
   for (const index of [1, 2, 3]) await expect(card.locator(`[data-identity="string:task-${String(index).padStart(6, "0")}"]`)).toHaveAttribute("data-shade", "unavailable");
   await page.screenshot({path: "artifacts/snapshot-status-shade-controls.png"});
   await page.keyboard.press("Escape");
   await card.locator('[data-identity="string:task-000001"]').hover();
-  await expect(card.getByRole("tooltip")).toContainText("Unavailable");
+  await expect(page.getByRole("tooltip")).toContainText("Unavailable");
   await page.getByRole("button", {name: "Save current workspace"}).click();
   expect((await serverState(page)).workspaces.sets[0]!.panels[0]).toMatchObject({view: {shadePath: "/extra", shadeScale: "log"}});
   await card.getByRole("button", {name: "Next task page"}).click();
@@ -667,7 +668,7 @@ test("Shade by keeps status hues, uses a pinned full-scope range and preserves t
   await expect(card.locator(".sv-shade-key")).toContainText("0 – 200");
   await expect(card.locator('[data-identity="string:task-001199"]')).toHaveAttribute("data-shade", "numeric");
   expect(await card.locator('[data-identity="string:task-001199"]').evaluate(node => node.style.getPropertyValue("--sv-shade"))).toBe("96%");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await page.setViewportSize({width: 390, height: 844}); await card.scrollIntoViewIfNeeded();
   await page.screenshot({path: "artifacts/snapshot-status-shade-mobile.png"});
   fixture.state.version = 1; fixture.state.badShadeRange = true;
@@ -675,7 +676,7 @@ test("Shade by keeps status hues, uses a pinned full-scope range and preserves t
   await expect(card.locator(".sv-feedback")).toContainText("shade range is incomplete");
   await expect(card.locator(".sv-task-cell").first()).toHaveAttribute("data-snapshot-id", "1000");
   await card.getByRole("button", {name: "Arrange", exact: true}).click();
-  await arrange.getByRole("combobox", {name: "Shade by", exact: true}).selectOption("__choose_snapshot_field__");
+  await selectOption(arrange.getByRole("combobox", {name: "Shade by", exact: true}), "__choose_snapshot_field__");
   await expect(card.locator(".sv-shade-key")).toHaveCount(0);
   await expect(card.locator(".sv-feedback")).toBeHidden();
   await expect(card.locator(".sv-task-cell").first()).toHaveAttribute("data-shade", "none");

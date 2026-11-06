@@ -1,5 +1,6 @@
+import {expectControlValue} from "./react-controls";
 import {test, expect, type Page} from "@playwright/test";
-import {mockApi, seedUiState, serverState, uiServer} from "./fixtures";
+import {mockApi, seedUiState, serverState, uiServer, setTheme, setPanelWidth} from "./fixtures";
 import type {WorkspaceSet} from "../src/app/panels";
 
 const training: WorkspaceSet = {id: "training", name: "Training", experimentId: "experiment-1",
@@ -19,8 +20,7 @@ async function setup(page: Page): Promise<void> {
 }
 async function makeWide(page: Page): Promise<void> {
   const card = page.locator('[data-panel-id="chart"]');
-  await card.locator(".menu-trigger").click();
-  await card.getByRole("menuitem", {name: "Make wide", exact: true}).click();
+  await setPanelWidth(page, "wide", card);
 }
 
 test("Saved expires once without live ticks reviving it and all feedback stays beside the name", async ({page}) => {
@@ -89,7 +89,7 @@ test("a slow list refresh cannot steal rename input and pending rename retries k
   await input.fill("First rename");
   uiServer(page).workspaces.revision++;
   release();
-  await expect(input).toHaveValue("First rename");
+  await expectControlValue(input, "First rename");
   let attempts = 0;
   const bodies: string[] = [];
   await page.route("**/api/ui/workspaces", route => {
@@ -102,7 +102,7 @@ test("a slow list refresh cannot steal rename input and pending rename retries k
   await input.fill("Second rename"); await input.press("Enter");
   await expect(page.locator(".workspace-rename-error")).toContainText("Previous rename confirmed");
   expect(bodies[1]).toBe(bodies[0]);
-  await expect(input).toHaveValue("Second rename"); await input.press("Enter");
+  await expectControlValue(input, "Second rename"); await input.press("Enter");
   await expect(picker).toHaveText("Second rename");
 });
 
@@ -123,11 +123,13 @@ test("large workspace lists search in place, and Updated plus metric table spaci
     await page.setViewportSize({width, height: 900});
     await expect(picker).toHaveCSS("padding-left", "8px");
     await expect(picker).toHaveCSS("padding-right", "8px");
-    if (width === 390) await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+    if (width === 390) await setTheme(page, "dark");
     const updated = page.locator(".collection-freshness");
     await expect(updated).toHaveText(/^Updated \d{2}:\d{2}:\d{2}$/);
-    const time = (await updated.boundingBox())!, add = (await page.getByRole("button", {name: "Add", exact: true}).boundingBox())!;
-    expect(Math.abs(time.y + time.height / 2 - add.y - add.height / 2)).toBeLessThan(1);
+    if (width > 1023) {
+      const time = (await updated.boundingBox())!, add = (await page.getByRole("button", {name: "Add", exact: true}).boundingBox())!;
+      expect(Math.abs(time.y + time.height / 2 - add.y - add.height / 2)).toBeLessThan(1);
+    } else await expect(updated).toBeHidden();
     expect((await page.locator(".brand-wordmark").boundingBox())?.width ?? 0).toBeLessThanOrEqual(38);
     const table = page.locator(".table-card"); await table.scrollIntoViewIfNeeded();
     await expect(table.locator("tbody tr")).toHaveCount(1);
@@ -136,11 +138,13 @@ test("large workspace lists search in place, and Updated plus metric table spaci
       const tools = node.querySelector(".table-tools")!.getBoundingClientRect();
       const search = node.querySelector(".table-search")!.getBoundingClientRect();
       const body = node.querySelector(".table-scroll")!.getBoundingClientRect();
-      return {titleToTools: search.top - header.bottom, toolsToBody: body.top - search.bottom, top: tools.top};
+      const lastControl = Math.max(...[...node.querySelectorAll(".table-tools input,.table-tools button,.table-tools select")]
+        .map(control => control.getBoundingClientRect()).filter(box => box.height).map(box => box.bottom));
+      return {titleToTools: search.top - header.bottom, toolsToBody: body.top - lastControl, top: tools.top};
     });
     expect(spacing.titleToTools).toBe(8); expect(spacing.toolsToBody).toBe(8);
     await page.screenshot({path: `artifacts/header-table-spacing-${width}.png`});
-    await page.locator(".chart-scroll").evaluate(node => {node.scrollTop = 0;});
+    await page.locator(".chart-scroll,.app-content").evaluateAll(nodes => nodes.forEach(node => {node.scrollTop = 0;}));
     await picker.click();
     await page.screenshot({path: `artifacts/header-picker-${width}.png`});
     const popup = (await page.locator(".workspace-popover").boundingBox())!;

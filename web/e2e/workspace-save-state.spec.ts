@@ -1,5 +1,6 @@
+import {expectControlValue, selectOption} from "./react-controls";
 import {test, expect, type Page} from "@playwright/test";
-import {mockApi, selectAddType, seedUiState, serverState} from "./fixtures";
+import {mockApi, selectAddType, seedUiState, serverState, setTheme, setPanelWidth} from "./fixtures";
 
 async function seed(page: Page, selected: string | null = "a"): Promise<void> {
   await seedUiState(page, {
@@ -10,10 +11,9 @@ async function seed(page: Page, selected: string | null = "a"): Promise<void> {
   });
 }
 
-async function resizeChart(page: Page, label = "Make wide"): Promise<void> {
+async function resizeChart(page: Page, width = "wide"): Promise<void> {
   const chart = page.locator(".section-grid .chart-card").first();
-  await chart.getByRole("button", {name: /chart options$/}).click();
-  await chart.getByRole("menuitem", {name: label, exact: true}).click();
+  await setPanelWidth(page, width, chart);
 }
 
 test("header shows current workspace, detects real edits and saves directly without resetting plots", async ({page}) => {
@@ -33,15 +33,15 @@ test("header shows current workspace, detects real edits and saves directly with
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   expect((await serverState(page)).workspaces.sets.find(set => set.id === "a")!.panels[0]!.size).toBe("wide");
   await page.screenshot({path: "artifacts/workspace-header-saved.png"});
-  await resizeChart(page, "Normal width"); await resizeChart(page);
+  await resizeChart(page, "half"); await resizeChart(page);
   await expect(header.locator(".workspace-save-status")).toHaveText("Saved");
-  await page.getByRole("combobox", {name: "Time range", exact: true}).selectOption("604800");
+  await selectOption(page.getByRole("combobox", {name: "Time range", exact: true}), "604800");
   await expect(header.locator(".workspace-save-status")).toHaveText("Saved");
   await page.reload();
   await expect(header.locator(".workspace-save-status")).toHaveText("Saved");
   await expect(header.getByRole("button", {name: "Workspace sets"})).toHaveText("Training overview");
   await expect(page.locator(".chart-card").first()).toHaveClass(/wide/);
-  await expect(page.getByRole("combobox", {name: "Time range", exact: true})).toHaveValue("604800");
+  await expectControlValue(page.getByRole("combobox", {name: "Time range", exact: true}), "604800");
 });
 
 test("unsaved workspace switching supports cancel, successful save, and explicit discard", async ({page}) => {
@@ -126,7 +126,7 @@ test("header identity and save status remain readable in a narrow dark viewport"
   await page.setViewportSize({width: 320, height: 844});
   await page.goto("/rvx?runs=run-1&live=0");
   await expect(page.locator(".workspace-save-status")).toHaveText("Saved");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await resizeChart(page);
   await expect(page.locator(".workspace-save-status")).toHaveCount(0);
   await expect(page.getByRole("button", {name: "Save current workspace"})).toBeVisible();

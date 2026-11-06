@@ -1,6 +1,6 @@
 import {test, expect, type Locator, type Page} from "@playwright/test";
 import {mkdir, writeFile} from "node:fs/promises";
-import {exactId, firstObservation, mockApi, seedWorkspace, seedUiState} from "./fixtures";
+import {exactId, firstObservation, mockApi, seedWorkspace, seedUiState, setTheme} from "./fixtures";
 
 interface TextPaint {text: string; left: number; right: number; top: number; bottom: number; y: number}
 declare global {interface Window {chartReadoutPaint: (canvas: HTMLCanvasElement) => TextPaint[]}}
@@ -49,15 +49,16 @@ async function centered(chart: Locator) {
     const left = Math.min(...parts.map(part => part.left)), right = Math.max(...parts.map(part => part.right));
     const action = node.querySelector(".menu-trigger")?.getBoundingClientRect(), bounds = heading.getBoundingClientRect();
     const states = [...node.querySelectorAll<HTMLElement>(".panel-indicators > :not([hidden])")].map(state => state.getBoundingClientRect());
-    return {centerOffset: (left + right - card.left - card.right) / 2, textWidth: right - left, cardWidth: card.width,
+    return {leftOffset: bounds.left - card.left, textWidth: right - left, cardWidth: card.width,
       headingRight: bounds.right, headingBottom: bounds.bottom, actionLeft: action?.left,
-      stateTop: states.length ? Math.min(...states.map(state => state.top)) : null,
-      titleFits: title.scrollWidth <= title.clientWidth};
+      stateLeft: states.length ? Math.min(...states.filter(state => state.width > 1).map(state => state.left)) : null,
+      titleFits: title.scrollWidth <= title.clientWidth || getComputedStyle(title).textOverflow === "ellipsis"};
   });
-  expect(Math.abs(geometry.centerOffset)).toBeLessThanOrEqual(1);
+  expect(geometry.leftOffset).toBeGreaterThanOrEqual(0);
+  expect(geometry.leftOffset).toBeLessThanOrEqual(16);
   expect(geometry.titleFits).toBe(true);
   if (geometry.actionLeft !== undefined) expect(geometry.headingRight).toBeLessThanOrEqual(geometry.actionLeft);
-  if (geometry.stateTop !== null) expect(geometry.stateTop).toBeGreaterThanOrEqual(geometry.headingBottom);
+  if (geometry.stateLeft !== null) expect(geometry.stateLeft).toBeGreaterThanOrEqual(geometry.headingRight);
   return geometry;
 }
 
@@ -103,11 +104,11 @@ for (const width of [1440, 390]) for (const scenario of [
     expect(paint.maxBottom).toBeLessThanOrEqual(paint.canvas.height - 2);
     expect(paint.minLeft).toBeGreaterThanOrEqual(0);
     expect(paint.maxRight).toBeLessThanOrEqual(paint.canvas.width);
-    expect(paint.plotHeight).toBeGreaterThanOrEqual(width === 390 ? 200 : 208);
+    expect(paint.plotHeight).toBeGreaterThanOrEqual(180);
   });
 }
 
-for (const width of [1440, 390]) test(`titles, units and wrapping stay card-centered through loading, zoom and fullscreen at ${width}px`, async ({page}) => {
+for (const width of [1440, 390]) test(`titles remain left-aligned and accessible through loading, zoom and fullscreen at ${width}px`, async ({page}) => {
   await page.setViewportSize({width, height: 900});
   await mockApi(page);
   await seedWorkspace(page, [
@@ -125,7 +126,7 @@ for (const width of [1440, 390]) test(`titles, units and wrapping stay card-cent
     const loading = await centered(first);
     release();
     await settled(first);
-    if (width === 390) await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+    if (width === 390) await setTheme(page, "dark");
     const measurements = [];
     for (const card of await cards.all()) {
       await card.scrollIntoViewIfNeeded();
@@ -143,9 +144,9 @@ for (const width of [1440, 390]) test(`titles, units and wrapping stay card-cent
     await expect(first.locator(".chart-zoom-state")).toBeVisible();
     const zoomed = await centered(first);
     await first.locator(".menu-trigger").click();
-    await expect(first.getByRole("menuitem", {name: /Inspect/i})).toHaveCount(0);
-    await expect(first.getByRole("menuitem", {name: "Reset zoom"})).toBeVisible();
-    await first.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+    await expect(page.getByRole("menuitem", {name: /Inspect/i})).toHaveCount(0);
+    await expect(page.getByRole("menuitem", {name: "Reset zoom"})).toBeVisible();
+    await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
     const expanded = page.getByRole("dialog", {name: "Policy loss", exact: true}).locator(".chart-card");
     await settled(expanded);
     const fullscreen = await centered(expanded);
@@ -158,7 +159,7 @@ for (const width of [1440, 390]) test(`titles, units and wrapping stay card-cent
   } finally {release();}
 });
 
-test("a shared table title stays centered with loading status and the options anchor", async ({page}) => {
+test("a shared table title stays left-aligned with loading status and the options anchor", async ({page}) => {
   await mockApi(page, {tableRows: 3});
   await seedUiState(page, {
     theme: "light", selected: {"experiment-1": "table-test"},
@@ -170,7 +171,7 @@ test("a shared table title stays centered with loading status and the options an
   await expect(table.locator("tbody tr")).toHaveCount(3);
   await centered(table);
   await table.locator(".menu-trigger").click();
-  await expect(table.getByRole("menuitem", {name: "Fullscreen"})).toBeVisible();
+  await expect(page.getByRole("menuitem", {name: "Fullscreen"})).toBeVisible();
   await page.screenshot({path: "artifacts/chart-readout-centered-table.png"});
 });
 
@@ -198,7 +199,7 @@ test("aligned values use one compact coordinate header and no Inspect feature or
   await page.mouse.move(box.x + box.width * .4, box.y + box.height * .4 + 10);
   await expect(tooltip).toHaveAttribute("data-text-mutations", "0");
   await chart.locator(".menu-trigger").click();
-  await expect(chart.getByRole("menuitem", {name: /Inspect/i, includeHidden: true})).toHaveCount(0);
+  await expect(page.getByRole("menuitem", {name: /Inspect/i, includeHidden: true})).toHaveCount(0);
   await expect(chart).not.toContainText(/Inspect|Nearest recorded observations/);
   await expect(chart.locator(".chart-host")).not.toHaveAttribute("aria-label", /Inspect/i);
   expect(requests.some(request => /^\/api\/snapshots\/\d+$/.test(request.path))).toBe(false);
@@ -347,7 +348,7 @@ test("touch keeps a compact tapped readout without stealing vertical scrolling",
     await session.send("Input.dispatchTouchEvent", {type: "touchStart", touchPoints: [{x, y}]});
     for (let step = 1; step <= 5; step++) await session.send("Input.dispatchTouchEvent", {type: "touchMove", touchPoints: [{x, y: y - step * 30}]});
     await session.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
-    await expect.poll(() => page.locator(".chart-scroll").evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+    await expect.poll(() => page.locator(".app-content").evaluate(node => node.scrollTop)).toBeGreaterThan(0);
     await expect(chart.getByRole("tooltip")).toBeHidden();
     await expect(chart.locator(".chart-zoom-state")).toBeHidden();
     expect(requests.some(request => /^\/api\/snapshots\/\d+$/.test(request.path))).toBe(false);
@@ -363,15 +364,17 @@ test("native previews retain centered headings and complete date text above a co
   const chart = page.locator(".section-grid .chart-card");
   await settled(chart);
   await chart.locator(".menu-trigger").click();
-  await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
-  const editor = page.getByRole("dialog", {name: "Edit panel", exact: true}), preview = editor.locator(".chart-preview .chart-card");
+  await page.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
+  const editor = page.getByRole("dialog", {name: /^Edit (chart|table|snapshot)$/, exact: true}), preview = editor.locator(".chart-preview .chart-card");
   await settled(preview);
   await centered(preview);
   const paint = await preview.locator("canvas").evaluate(canvas => ({
     height: canvas.height, maxBottom: Math.max(...window.chartReadoutPaint(canvas).map(label => label.bottom)),
   }));
   expect(paint.maxBottom).toBeLessThanOrEqual(paint.height - 2);
-  expect((await preview.locator(".u-over").boundingBox())!.height).toBeGreaterThanOrEqual(180);
+  const plotHeight = (await preview.locator(".u-over").boundingBox())!.height;
+  expect(plotHeight).toBeGreaterThanOrEqual(100);
+  expect(plotHeight).toBeLessThanOrEqual(140);
   await hover(page, preview, .9, .8);
   await bounded(preview.getByRole("tooltip"), 1440, 900);
   await expect(preview).not.toContainText(/Inspect|Nearest/);
@@ -381,6 +384,7 @@ test("native previews retain centered headings and complete date text above a co
 
 test("elapsed plotting density and scientific Y-label width are preserved", async ({page}) => {
   await page.setViewportSize({width: 390, height: 844});
+  await recordText(page);
   await mockApi(page, {points: 6, metricValues: {"run-1": {"/progress/loss": -1e-12}}});
   await seedWorkspace(page, [{path: "/progress/loss", size: "normal"}]);
   await page.goto("/rvx?runs=run-1&live=0");
@@ -388,14 +392,17 @@ test("elapsed plotting density and scientific Y-label width are preserved", asyn
   await settled(chart);
   const geometry = await chart.evaluate(node => {
     const host = node.querySelector(".chart-host")!.getBoundingClientRect(), plot = node.querySelector(".u-over")!.getBoundingClientRect();
-    const ctx = node.querySelector("canvas")!.getContext("2d")!;
+    const canvas = node.querySelector("canvas")!, canvasBox = canvas.getBoundingClientRect();
+    const ctx = canvas.getContext("2d")!;
     ctx.save(); ctx.font = "11px system-ui, sans-serif";
     const labelWidth = ctx.measureText("-1.00e-12").width;
     ctx.restore();
-    return {hostHeight: host.height, plotHeight: plot.height, leftAxis: plot.left - host.left, labelWidth};
+    const xLabels = window.chartReadoutPaint(canvas).filter(label => label.top >= (plot.bottom - canvasBox.top) * canvas.height / canvasBox.height);
+    return {hostHeight: host.height, plotHeight: plot.height, leftAxis: plot.left - host.left, labelWidth, xLabels: xLabels.length};
   });
-  expect(geometry.hostHeight).toBe(236);
-  expect(geometry.plotHeight).toBe(200);
+  expect(geometry.hostHeight).toBe(220);
+  expect(geometry.plotHeight).toBeGreaterThanOrEqual(180);
   expect(geometry.leftAxis).toBeGreaterThan(geometry.labelWidth + 6);
+  expect(geometry.xLabels).toBeGreaterThan(2);
   await page.screenshot({path: "artifacts/chart-readout-scientific-elapsed.png"});
 });

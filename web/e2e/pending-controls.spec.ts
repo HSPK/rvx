@@ -1,3 +1,4 @@
+import {selectOption} from "./react-controls";
 import {test, expect, type Page} from "@playwright/test";
 import {mockApi, type FixtureOptions} from "./fixtures";
 
@@ -11,7 +12,7 @@ test("a hidden initial catalog load resumes automatically when visible", async (
   await page.route("**/api/charts/catalog", async route => {if (held) await gate; await route.fallback();});
   try {
     await page.goto("/rvx?runs=run-1");
-    await expect(page.getByRole("heading", {name: "Loading panels", exact: true})).toBeVisible();
+    await expect(page.getByRole("heading", {name: "Loading panels…", exact: true})).toBeVisible();
     await visibility(page, true);
     held = false; release();
     await expect(page.locator(".chart-card")).toHaveCount(0);
@@ -90,7 +91,7 @@ test("a hidden range read resumes with its actual latest requested bounds", asyn
     await page.goto("/rvx?runs=run-1&live=0");
     const chart = page.locator(".chart-card").first(); await expect(chart.locator("canvas")).toBeVisible();
     held = true;
-    await page.getByRole("combobox", {name: "Time range", exact: true}).selectOption("900");
+    await selectOption(page.getByRole("combobox", {name: "Time range", exact: true}), "900");
     await expect.poll(() => waiting).toBe(true); await visibility(page, true);
     held = false; release(); await visibility(page, false);
     await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.from).toBe(9840e9);

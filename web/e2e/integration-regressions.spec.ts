@@ -1,5 +1,5 @@
 import {test, expect, type Page} from "@playwright/test";
-import {mockApi, seedWorkspace, serverState, type FixtureOptions} from "./fixtures";
+import {mockApi, seedWorkspace, serverState, setTheme, type FixtureOptions} from "./fixtures";
 
 async function savedSet(page: Page, paths: string[]): Promise<void> {
   await seedWorkspace(page, paths.map(path => ({path, size: "normal"})));
@@ -27,7 +27,7 @@ test("a wholly absent saved set settles honestly without sending an empty or uni
   await expect(page.locator(".chart-card .chart-status")).toHaveText("Not recorded");
   await page.waitForTimeout(150);
   expect(requests.filter(request => request.path === "/api/snapshots/query")).toHaveLength(0);
-  await expect(page.locator(".chart-card").getByRole("menuitem", {name: /Inspect/, includeHidden: true})).toHaveCount(0);
+  await expect(page.getByRole("menuitem", {name: /Inspect/, includeHidden: true})).toHaveCount(0);
   delete options.omittedPaths;
   await expect(page.locator(".chart-card canvas")).toBeVisible({timeout: 9000});
   await expect(page.locator(".chart-card").getByRole("heading", {name: "Memory usage"})).toBeVisible();
@@ -76,7 +76,7 @@ test("explicit removal and a saved empty set never regrow during later discovery
   for (let index = 0; index < 6; index++) {
     const first = page.locator(".chart-card").first();
     await first.locator(".menu-trigger").click();
-    await first.getByRole("menuitem", {name: "Remove chart", exact: true}).click();
+    await page.getByRole("menuitem", {name: "Remove chart", exact: true}).click();
   }
   await expect(page.getByRole("heading", {name: "No panels selected"})).toBeVisible();
   await page.getByRole("button", {name: "Workspace sets"}).click();
@@ -135,7 +135,7 @@ test("failed server writes warn for both chart-set saves and appearance changes"
   await page.keyboard.press("Escape");
   await expect(page.locator(".preferences-notice")).toContainText("Server settings are temporarily unavailable");
   await page.getByRole("button", {name: "Dismiss notification"}).click();
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await expect(page.locator(".preferences-notice")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();

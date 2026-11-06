@@ -1,5 +1,6 @@
+import {selectOption} from "./react-controls";
 import {test, expect} from "@playwright/test";
-import {mockApi, seedWorkspace, serverState, type FixtureOptions} from "./fixtures";
+import {mockApi, seedWorkspace, serverState, setPanelWidth, type FixtureOptions} from "./fixtures";
 
 test("panel menus, reset zoom, workspace saves and deletion remain directly operable", async ({page}) => {
   await mockApi(page);
@@ -9,14 +10,17 @@ test("panel menus, reset zoom, workspace saves and deletion remain directly oper
   const canvas = await first.locator("canvas").elementHandle();
   const menu = first.getByRole("button", {name: "Policy loss chart options"});
   await menu.click();
-  await expect(first.getByRole("menuitem", {name: /Move earlier|Move later/})).toHaveCount(0);
-  await first.getByRole("menuitem", {name: "Make wide"}).click();
+  await expect(page.getByRole("menuitem", {name: /Move earlier|Move later/})).toHaveCount(0);
+  await expect(page.getByRole("menuitem", {name: "Make wide"})).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await setPanelWidth(page, "wide", first);
   await expect(first).toHaveClass(/wide/);
-  await menu.click(); await first.getByRole("menuitem", {name: "Normal width"}).click();
+  await setPanelWidth(page, "half", first);
+  await expect.poll(() => first.locator(".uplot").evaluate(node => Math.abs(node.clientWidth - node.parentElement!.clientWidth))).toBeLessThanOrEqual(1);
   const box = (await first.locator(".u-over").boundingBox())!;
   await page.mouse.move(box.x + 25, box.y + 30); await page.mouse.down();
   await page.mouse.move(box.x + box.width - 25, box.y + 30, {steps: 5}); await page.mouse.up();
-  await menu.click(); await first.getByRole("menuitem", {name: "Reset zoom"}).click();
+  await menu.click(); await page.getByRole("menuitem", {name: "Reset zoom"}).click();
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   await page.getByRole("button", {name: "Workspace sets"}).click();
   const sets = page.getByRole("dialog", {name: "Workspace sets"});
@@ -41,28 +45,27 @@ test("pointer actions survive transient focus changes and open persistent edit/f
   await expect(card.locator("canvas")).toBeVisible();
   const canvas = await card.locator("canvas").elementHandle();
   await trigger.click();
-  const fullscreen = card.getByRole("menuitem", {name: "Fullscreen", exact: true});
+  const fullscreen = page.getByRole("menuitem", {name: "Fullscreen", exact: true});
   await fullscreen.evaluate(node => node.addEventListener("pointerdown", () => {
     document.querySelector<HTMLElement>(".chart-scroll")!.focus({preventScroll: true});
   }, {once: true}));
   const target = (await fullscreen.boundingBox())!;
   await page.mouse.click(target.x + target.width / 2, target.y + target.height / 2);
-  await expect(page.locator(".panel-fullscreen[open]")).toBeVisible();
+  await expect(page.getByRole("dialog", {name: "Policy loss", exact: true})).toBeVisible();
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   await page.keyboard.press("Escape");
   await trigger.click();
-  const edit = (await card.getByRole("menuitem", {name: "Edit chart", exact: true}).boundingBox())!;
+  const edit = (await page.getByRole("menuitem", {name: "Edit chart", exact: true}).boundingBox())!;
   await page.mouse.click(edit.x + edit.width / 2, edit.y + edit.height / 2);
-  await expect(page.getByRole("dialog", {name: "Edit panel", exact: true})).toBeVisible();
+  await expect(page.getByRole("dialog", {name: /^Edit (chart|table|snapshot)$/, exact: true})).toBeVisible();
   await page.keyboard.press("Escape");
-  await trigger.click();
-  await card.getByRole("menuitem", {name: "Make wide", exact: true}).click();
+  await setPanelWidth(page, "wide", card);
   await expect(card).toHaveClass(/wide/);
   await trigger.click();
   await page.keyboard.press("Tab");
-  await expect(card.getByRole("menu")).toHaveCount(0);
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await trigger.click();
-  await card.getByRole("menuitem", {name: "Remove chart", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Remove chart", exact: true}).click();
   await expect(card).toHaveCount(0);
 });
 
@@ -78,7 +81,7 @@ test("retry preserves last successful data and metadata filters never change Run
   options.failQueries = false;
   await first.getByRole("button", {name: "Retry", exact: true}).click();
   await expect(first.locator(".chart-status")).toBeHidden();
-  await page.getByRole("combobox", {name: "Status", exact: true}).selectOption("finished");
+  await selectOption(page.getByRole("combobox", {name: "Status", exact: true}), "finished");
   await expect(page.locator(".selection-count")).toContainText("outside filters");
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
 });

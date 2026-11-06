@@ -1,3 +1,4 @@
+import {selectOption} from "./react-controls";
 import {selectAddType} from "./fixtures";
 import {test, expect} from "@playwright/test";
 import {mkdir, readFile, writeFile} from "node:fs/promises";
@@ -113,7 +114,7 @@ test("real SDK/Pull data renders authoritative summaries, latest worker rows, an
   await editor.getByRole("checkbox", {name: "Select metric Loss", exact: true}).check();
   await editor.getByRole("searchbox", {name: "Search metrics"}).fill("Score");
   await editor.getByRole("checkbox", {name: "Select metric Score", exact: true}).check();
-  await editor.getByRole("combobox", {name: "Chart layout"}).selectOption("combined");
+  await selectOption(editor.getByRole("combobox", {name: "Chart layout"}), "combined");
   await expect(editor.locator(".chart-preview canvas")).toBeVisible();
   await expect(editor.locator(".chart-preview .legend-item")).toHaveCount(4);
   await page.screenshot({path: "artifacts/real-sdk-combined-preview.png"});
@@ -122,7 +123,7 @@ test("real SDK/Pull data renders authoritative summaries, latest worker rows, an
   await combined.scrollIntoViewIfNeeded(); await expect(combined.locator("canvas")).toBeVisible();
   const canvas = await combined.locator("canvas").elementHandle();
   await combined.locator(".menu-trigger").click();
-  await combined.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
   const fullscreen = page.locator(".panel-fullscreen");
   await expect(fullscreen).toBeVisible();
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);

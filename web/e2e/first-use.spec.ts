@@ -1,5 +1,5 @@
 import {test, expect} from "@playwright/test";
-import {mockApi} from "./fixtures";
+import {mockApi, openRunManagement} from "./fixtures";
 
 test("an empty registry explains setup and refreshes into native Run selection", async ({page}) => {
   const requests = await mockApi(page);
@@ -27,10 +27,10 @@ test("an empty registry explains setup and refreshes into native Run selection",
     await expect(refresh).toBeDisabled();
     release();
     await expect(empty.getByRole("heading", {name: "Select runs", exact: true})).toBeVisible();
-    await page.getByRole("button", {name: "Select runs (0 selected)"}).click();
-    const sheet = page.getByRole("dialog", {name: "Runs", exact: true});
+    await openRunManagement(page);
+    const sheet = page.locator(".runs-dock");
     await sheet.getByRole("checkbox", {name: "Select grpo · warm-start"}).check();
-    await sheet.getByRole("button", {name: "Close", exact: true}).click();
+    await sheet.getByRole("button", {name: "Manage runs", exact: true}).click();
     await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
     expect(new URL(page.url()).pathname).toBe("/rvx");
   } finally {release();}

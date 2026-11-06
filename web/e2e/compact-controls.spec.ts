@@ -1,6 +1,7 @@
+import {expectControlValue, selectOption} from "./react-controls";
 import {test, expect, type Page} from "@playwright/test";
 import {readFile} from "node:fs/promises";
-import {mockApi, seedUiState, serverState, uiServer} from "./fixtures";
+import {mockApi, seedUiState, serverState, uiServer, setTheme, openRunManagement, openRunDetails} from "./fixtures";
 import type {PanelSpec} from "../src/app/panels";
 
 const chart: PanelSpec = {kind: "chart", id: "chart", sectionId: "main", size: "normal", path: "/progress/loss"};
@@ -15,9 +16,9 @@ test("active status filters retain a quiet background without a permanent outlin
   await mockApi(page); await seed(page, [chart]);
   await page.goto("/rvx?runs=run-1");
   const status = page.getByRole("combobox", {name: "Status", exact: true});
-  await status.selectOption("running");
+  await selectOption(status, "running");
   for (const theme of ["light", "dark"]) {
-    if (await page.locator("html").getAttribute("data-theme") !== theme) await page.getByRole("button", {name: `Switch to ${theme} appearance`}).click();
+    await setTheme(page, theme);
     await expect(status).toHaveClass(/is-filtered/);
     await status.hover();
     await expect(status).toHaveCSS("box-shadow", "none");
@@ -29,9 +30,9 @@ test("active status filters retain a quiet background without a permanent outlin
     await expect(page.locator(".chart-card canvas")).toBeVisible();
     await page.screenshot({path: `artifacts/filter-without-outline-${theme}.png`});
   }
-  await page.reload(); await expect(status).toHaveValue("running");
+  await page.reload(); await expectControlValue(status, "running");
   await expect(status).toHaveCSS("box-shadow", "none");
-  await status.selectOption("");
+  await selectOption(status, "");
   await expect(status).not.toHaveClass(/is-filtered/);
 });
 
@@ -81,7 +82,8 @@ test("Run colors repaint existing zoomed curves and persist only in the browser'
   await page.mouse.move(box.x + 30, box.y + 50); await page.mouse.down();
   await page.mouse.move(box.x + box.width * .7, box.y + 50, {steps: 5}); await page.mouse.up();
   const zoom = await card.locator(".chart-host").getAttribute("aria-description");
-  const swatch = page.locator('.run-chip[data-run-id="run-1"] .run-color-button');
+  await openRunDetails(page, "run-1");
+  const swatch = page.getByRole("button", {name: "Change color for grpo · warm-start", exact: true});
   await swatch.click();
   await page.getByRole("button", {name: "Use #15917d", exact: true}).click();
   await expect.poll(async () => (await serverState(page)).browser.run_colors["run-1"]).toBe("#15917d");
@@ -96,8 +98,11 @@ test("Run colors repaint existing zoomed curves and persist only in the browser'
   await expect(page.locator(".workspace-save-slot")).toHaveText("Saved");
   await swatch.click(); await page.screenshot({path: "artifacts/compact-run-colors.png"});
   await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
   await page.reload();
+  await openRunDetails(page, "run-1");
   await expect(swatch).toHaveCSS("--run-color", "#15917d");
+  await page.keyboard.press("Escape");
   const context = await browser.newContext({baseURL: test.info().project.use.baseURL});
   try {
     const other = await context.newPage(); await mockApi(other, {uiServer: uiServer(page)});
@@ -119,7 +124,7 @@ test("column decimals preserve exact raw values and exports, without refetching 
   await expect(card.locator("tbody tr")).toHaveCount(75);
   const count = requests.filter(request => request.path === "/api/tables/rows").length;
   await card.getByRole("button", {name: "Columns", exact: true}).click();
-  await page.getByRole("combobox", {name: "Decimal places for counter", exact: true}).selectOption("2");
+  await selectOption(page.getByRole("combobox", {name: "Decimal places for counter", exact: true}), "2");
   await expect(card.locator('tbody [data-column="/counter"]').first()).toHaveText("18446744073709551615.00");
   expect(requests.filter(request => request.path === "/api/tables/rows").length).toBe(count);
   await page.screenshot({path: "artifacts/compact-column-decimals.png"});
@@ -137,7 +142,7 @@ test("column decimals preserve exact raw values and exports, without refetching 
   await page.reload();
   await expect(card.locator('tbody [data-column="/counter"]').first()).toHaveText("18446744073709551615.00");
   await card.getByRole("button", {name: "Columns", exact: true}).click();
-  await page.getByRole("combobox", {name: "Decimal places for counter", exact: true}).selectOption("");
+  await selectOption(page.getByRole("combobox", {name: "Decimal places for counter", exact: true}), "");
   await page.keyboard.press("Escape");
   await expect(card.locator('tbody [data-column="/counter"]').first()).toHaveText("18446744073709551615");
 });
@@ -189,7 +194,7 @@ test("touch column handles reorder without changing visibility or decimal prefer
     await session.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
     await expect(card.locator("thead th").nth(1)).toHaveAttribute("data-column", "/load");
     await expect(modal.getByRole("checkbox", {name: "Show healthy", exact: true})).not.toBeChecked();
-    await expect(modal.getByRole("combobox", {name: "Decimal places for load", exact: true})).toHaveValue("2");
+    await expectControlValue(modal.getByRole("combobox", {name: "Decimal places for load", exact: true}), "2");
     await session.detach();
   } finally {await context.close();}
 });
@@ -221,7 +226,7 @@ test("filters can be disabled, re-enabled and edited without losing their saved 
   await expect(card.locator("tbody tr")).toHaveCount(4);
 });
 
-test("later native filter options stay inside the filter interaction rather than dismissing the dialog", async ({page}) => {
+test("later filter options stay inside the filter interaction rather than dismissing the dialog", async ({page}) => {
   await mockApi(page); await seed(page, [table]);
   await page.goto("/rvx?runs=run-1");
   const card = page.locator(".table-card");
@@ -232,10 +237,9 @@ test("later native filter options stay inside the filter interaction rather than
   for (const viewport of [{width: 1440, height: 900}, {width: 844, height: 390}, {width: 390, height: 844}]) {
     await page.setViewportSize(viewport);
     for (const path of ["/counter", "/healthy", "/nullable", "/nested"]) {
-      await column.click();
-      await column.locator(`option[value="${path}"]`).click();
+      await selectOption(column, path);
       await expect(modal).toBeVisible();
-      await expect(column).toHaveValue(path);
+      await expectControlValue(column, path);
     }
   }
 });
@@ -292,20 +296,22 @@ test("responsive toolbars group actions and keep touch details accessible withou
   for (const width of [2560, 1440, 901, 390, 320]) {
     await page.setViewportSize({width, height: 1000});
     if (width <= 390 && await page.locator("html").getAttribute("data-theme") !== "dark") {
-      await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+      await setTheme(page, "dark");
     }
     await expect(page.locator(".chart-card canvas")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     const range = (await page.getByRole("combobox", {name: "Time range", exact: true}).boundingBox())!;
-    const observed = (await page.locator(".collection-freshness").boundingBox())!;
-    expect(Math.abs(range.y + range.height / 2 - observed.y - observed.height / 2)).toBeLessThan(2);
+    if (width > 1023) {
+      const observed = (await page.locator(".collection-freshness").boundingBox())!;
+      expect(Math.abs(range.y + range.height / 2 - observed.y - observed.height / 2)).toBeLessThan(2);
+    } else await expect(page.locator(".collection-freshness")).toBeHidden();
     await page.screenshot({path: `artifacts/compact-controls-${width}.png`});
     const card = page.locator(".table-card");
     await card.scrollIntoViewIfNeeded();
     const buttons = await card.locator(".table-actions > button").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().y));
     expect(new Set(buttons).size).toBe(1);
     await expect(page.getByText(/independent source observation|Collection discovery is partial/)).toHaveCount(0);
-    await page.locator(".chart-scroll").evaluate(node => {node.scrollTop = 0;});
+    await page.locator(".chart-scroll,.app-content").evaluateAll(nodes => nodes.forEach(node => {node.scrollTop = 0;}));
   }
   await page.getByRole("button", {name: "Add", exact: true}).click();
   await page.screenshot({path: "artifacts/compact-add-mobile.png"});
@@ -323,11 +329,11 @@ test("Add keeps optional appearance controls behind a keyboard disclosure withou
   await appearance.focus(); await page.keyboard.press("Enter");
   await width.fill("3");
   await appearance.click(); await expect(width).toBeHidden();
-  await appearance.click(); await expect(width).toHaveValue("3");
+  await appearance.click(); await expectControlValue(width, "3");
   await editor.getByRole("tab", {name: "Snapshot", exact: true}).click();
   await expect(appearance).toBeHidden();
   await editor.getByRole("tab", {name: "Chart", exact: true}).click();
-  await expect(width).toHaveValue("3");
+  await expectControlValue(width, "3");
   for (const viewport of [{width: 1440, height: 900}, {width: 390, height: 844}, {width: 320, height: 568}, {width: 844, height: 390}]) {
     await page.setViewportSize(viewport);
     await expect(editor.getByRole("button", {name: "Cancel", exact: true})).toBeInViewport();
@@ -344,8 +350,8 @@ test("touch devices keep Run details discoverable without hover", async ({browse
   try {
     const page = await context.newPage(); await mockApi(page);
     await page.goto("/rvx?runs=run-1");
-    await page.getByRole("button", {name: "Select runs (1 selected)"}).click();
-    const details = page.getByRole("dialog", {name: "Runs", exact: true}).locator(".run-detail-button").first();
+    await openRunManagement(page);
+    const details = page.locator(".runs-dock .run-detail-button").first();
     await expect(details).toHaveCSS("opacity", "1");
     await details.tap(); await expect(page.getByRole("dialog", {name: "Run details", exact: true})).toBeVisible();
     await page.screenshot({path: "artifacts/compact-touch-details.png"});

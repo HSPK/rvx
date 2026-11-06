@@ -1,0 +1,365 @@
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "./styles.css" layer(base);
+@import "./chart-surface.css" layer(base);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+@import "./theme.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Geist Variable", sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--foreground);
+  --color-popover: var(--card);
+  --color-popover-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--foreground);
+  --color-muted: var(--muted-surface);
+  --color-muted-foreground: var(--muted);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-destructive: var(--error);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+}
+
+.rvx-tooltip {z-index: 150; max-width: 320px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); padding: 6px 8px; box-shadow: none; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; pointer-events: none}
+.react-menu, .react-popover {z-index: 120; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); outline: none}
+.react-menu {padding: 4px; min-width: 160px}
+.react-menu .menu-item {display: flex; align-items: center; gap: 8px; outline: none; cursor: default}
+.react-menu .menu-item[data-highlighted] {background: var(--muted-surface)}
+.react-menu .menu-item svg {width: 14px; height: 14px}
+.react-menu .destructive {color: var(--error)}
+.react-popover.workspace-popover {width: min(336px, calc(100vw - 16px)); max-height: min(520px, calc(100dvh - 64px)); padding: 6px; overflow: auto}
+.react-popover .dialog-body {display: flex; flex-direction: column; gap: 4px; padding: 0}
+.react-popover.workspace-menu {width: min(240px, calc(100vw - 16px))}
+.workspace-picker {padding-inline: 8px}
+.workspace-save-slot > .workspace-save, .workspace-save-status {height: 30px; font-size: 12px; line-height: 20px}
+.react-dialog {display: flex; flex-direction: column; max-height: calc(100svh - 32px); overflow: auto}
+.react-dialog > .dialog-body {padding: 0; min-height: 0}
+.chart-editor[data-state="open"], .run-drawer[data-state="open"], .table-filters-dialog[data-state="open"] {display: flex}
+.table-preview > .table-card {height: auto; min-height: 180px; max-height: 440px; overflow: auto}
+.react-panel-grid.section-stack {display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-content: start; gap: 16px}
+.react-panel-grid > .section-header {grid-column: 1 / -1; margin: 0; padding: 0; min-width: 0}
+.react-panel-grid > .section-empty {grid-column: 1 / -1}
+.react-panel-grid > .sr-only {position: absolute}
+.react-panel-grid .chart-card[hidden] {display: none}
+.chart-card.is-expanded {position: fixed; inset: 12px; z-index: 131; display: flex; flex-direction: column; min-width: 0; max-width: none; width: auto; height: auto; margin: 0; overflow: auto}
+.is-expanded .chart-host {flex: 1; min-height: 220px}
+.panel-fullscreen-backdrop {position: fixed; inset: 0; z-index: 130; background: rgb(0 0 0 / 25%)}
+.panel-frame-host {display: contents}
+.panel-frame-host.panel-fullscreen {position: fixed; inset: 0; z-index: 131; display: flex; padding: 32px 8px 8px; border-radius: 0; background: var(--surface); min-width: 0; min-height: 0}
+.panel-fullscreen > .chart-card.is-expanded {position: relative; inset: auto; flex: 1; min-height: 0; overflow: auto}
+.panel-fullscreen-controls {position: absolute; right: 8px; top: 4px; display: flex}
+.react-panel-grid .chart-card {grid-column: span var(--panel-span, var(--normal-panel-span))}
+.react-panel-grid .chart-card[data-panel-size="quarter"] {--panel-span: 3}
+.react-panel-grid .chart-card[data-panel-size="third"] {--panel-span: 4}
+.react-panel-grid .chart-card[data-panel-size="half"] {--panel-span: 6}
+.react-panel-grid .chart-card[data-panel-size="two-thirds"] {--panel-span: 8}
+.react-panel-grid .chart-card[data-panel-size="three-quarters"] {--panel-span: 9}
+.react-panel-grid .chart-card[data-panel-size="wide"] {grid-column: 1 / -1}
+@container (max-width: 679px) {.react-panel-grid .chart-card {grid-column: 1 / -1}}
+.workspace-local-notice {position: fixed; right: 16px; bottom: 16px; z-index: 115; width: min(440px, calc(100vw - 32px))}
+.notification-region > .workspace-local-notice {position: relative; inset: auto; width: auto}
+.run-checkbox[data-state="checked"] {background: var(--run-color); border-color: var(--run-color); color: white}
+.run-checkbox svg {width: 12px; height: 12px}
+.run-checkbox {padding: 0}
+.auth-lock-overlay {position: fixed; inset: 0; z-index: 200; background: var(--background)}
+.auth-lock[data-state="open"] {display: grid; place-items: center; z-index: 201; background: var(--background)}
+[data-slot="select-content"], [data-slot="select-positioner"] {z-index: 160}
+
+@media (max-width: 1023px) {
+  .react-panel-grid.section-stack {grid-template-columns: minmax(0, 1fr)}
+  .react-panel-grid > .chart-card {grid-column: 1 / -1}
+  .chart-card.is-expanded {inset: 8px}
+}
+
+@layer base {
+  button[data-slot="button"] {background-color: transparent; border-style: solid}
+}
+
+body {color: var(--text); background: var(--background)}
+.app-content {padding: 12px}
+.analysis-layout {display: grid; width: 100%; min-width: 0; grid-template-columns: var(--sidebar-width, 288px) minmax(0, 1fr); gap: 12px; overflow: visible}
+.runs-dock {height: 100%; overflow: visible; border: 0; background: transparent; min-width: 0}
+.runs-panel, .workspace-controls, .chart-card {border: 1px solid var(--line); background: var(--surface); border-radius: calc(var(--radius) * 1.8); box-shadow: 0 2px 8px rgb(0 0 0 / 2%)}
+.runs-panel {height: 100%; display: flex; flex-direction: column; min-height: 0; padding: 12px; gap: 16px}
+.runs-panel-header {display: flex; flex: none; align-items: center; gap: 8px; height: 32px}
+.runs-panel-brand {display: flex; align-items: center; flex: 1; min-width: 0; height: 32px}
+.runs-panel-brand .brand {height: 32px; gap: 8px}
+.runs-panel-brand .brand-icon {width: 32px; height: 32px; padding: 6px; border-radius: 8px; background: color-mix(in oklch, var(--primary) 10%, transparent)}
+.runs-panel-brand .brand-wordmark {display: block; width: 38px; height: 19px}
+.runs-panel-toggle, .runs-panel-mobile-toggle {background: color-mix(in oklch, var(--primary) 10%, transparent); color: var(--primary); border-radius: var(--radius-lg)}
+.runs-panel-toggle:hover, .runs-panel-mobile-toggle:hover {background: color-mix(in oklch, var(--primary) 15%, transparent)}
+.runs-panel-mobile-toggle {display: none}
+.runs-panel-content {flex: 1; min-height: 0}
+.runs-selector {height: 100%; padding: 0; --rail-gutter: 0px}
+.run-filters {gap: 8px; padding-bottom: 8px; margin-right: 0}
+.run-search-row {grid-template-columns: minmax(0, 1fr) 28px}
+.run-search-row > .icon-button {display: none}
+.run-search-row .search-box {min-height: 32px}
+.run-search-row .search-box input {height: 30px}
+.run-filters > .select {height: 30px; min-height: 30px; font-size: 12px; padding-block: 4px}
+.run-status-filter.select {width: 28px; min-width: 28px; height: 32px; justify-content: center; background-image: none; color: var(--muted)}
+.run-status-filter.select > svg {width: 16px; height: 16px}
+.run-row {border-radius: 8px; padding-inline: 8px}
+.run-name strong {font-size: 12px; font-weight: 500}
+.run-row.selected {background: color-mix(in oklch, var(--primary) 6%, var(--surface))}
+.run-status {width: 5px; height: 5px}
+.runs-panel-footer {display: flex; flex: none; align-items: center; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0}
+.runs-live {margin-right: auto; color: var(--muted)}
+.runs-live[aria-pressed="true"] {color: var(--primary)}
+.connection-host {display: flex; margin: 0; max-width: 80px; min-width: 0}
+.connection-status {height: 28px; min-width: 20px; padding: 4px}
+.connection-status[data-state="connected"] .connection-label {display: none}
+.connection-label {font-size: 10px}
+.connection-dot {width: 6px; height: 6px}
+.panel-storage-error {font-size: 11px; color: var(--error)}
+.sidebar-resizer {right: -6px; width: 10px; outline: none; background: transparent; border: 0; box-shadow: none}
+.sidebar-resizer::after {content: ""; position: absolute; left: 4px; top: 50%; width: 2px; height: 24px; border-radius: 2px; background: var(--primary); opacity: 0; transform: translateY(-50%); transition: opacity 150ms}
+.sidebar-resizer:hover, .sidebar-resizer:focus-visible, .sidebar-resizer.is-resizing {background: transparent; outline: none; box-shadow: none}
+.sidebar-resizer:hover::after, .sidebar-resizer:focus-visible::after, .sidebar-resizer.is-resizing::after {opacity: .7}
+.workspace-page {gap: 16px; overflow: hidden}
+.workspace-controls {padding: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px}
+.workspace-header-host {flex: 0 1 auto}
+.workspace-header {gap: 4px}
+.workspace-picker {font-size: 12px; max-width: 200px; min-height: 32px}
+.workspace-save-slot {height: 32px}
+.chart-toolbar {display: flex; flex: 1; flex-wrap: wrap; margin: 0; gap: 4px 8px}
+.selection-strip {min-width: 0; flex: 1; overflow: hidden}
+.run-chips {gap: 4px}
+.run-chip {background: transparent; font-size: 11px; gap: 2px; max-width: 180px}
+.run-color-button {width: 18px; height: 24px}
+.run-color-dot {width: 7px; height: 7px}
+.run-chip > .icon-button {width: 22px; min-width: 22px; height: 24px; padding: 5px}
+.chip-state {font-size: 10px}
+.chart-toolbar .chart-actions {margin-left: auto; gap: 4px}
+.chart-axis-controls {display: flex; flex-wrap: wrap; align-items: center; gap: 2px}
+.chart-axis-choice {min-height: 28px; padding: 4px 8px; border: 0; border-radius: var(--radius-lg); background: transparent; color: var(--muted); font-size: 12px}
+.chart-axis-choice[data-state="checked"], .chart-axis-choice:hover {background: var(--muted-surface); color: var(--text)}
+.chart-axis-choice:focus-visible {outline: 1px solid var(--ring); outline-offset: 1px}
+.collection-freshness {font-size: 10px; min-height: 28px}
+.chart-scroll {padding: 0 0 4px; scrollbar-gutter: auto; overscroll-behavior: auto}
+.section-stack {gap: 16px}
+.section-header {padding: 0 0 10px; gap: 4px}
+.section-name {font-size: 12px; padding: 4px; color: var(--muted); font-weight: 600}
+.section-name:hover {color: var(--text)}
+.section-header > .icon-button {width: 28px; min-width: 28px; height: 28px; padding: 6px}
+.chart-grid {gap: 16px}
+@container (min-width: 900px) {
+  .chart-grid {--normal-panel-span: 3}
+}
+.chart-card {padding: 6px 8px; overflow: visible}
+.chart-header {display: flex; min-height: 28px; gap: 4px; align-items: center}
+.metric-heading {flex: 1; justify-self: auto; justify-content: flex-start; text-align: left; min-width: 0}
+.metric-heading h2 {min-width: 0; max-width: 100%; font: 500 12px/20px ui-monospace, SFMono-Regular, monospace; overflow: hidden; white-space: nowrap; text-overflow: ellipsis}
+.metric-unit {font: 11px/20px ui-monospace, SFMono-Regular, monospace}
+.panel-drag-handle {display: flex; align-items: center; gap: 4px; min-height: 24px; max-width: 100%; text-align: left; padding: 2px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: var(--radius-lg)}
+.panel-title-text {min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+.panel-drag-handle .metric-unit {flex: none}
+.panel-drag-handle:hover:not(:disabled), .panel-drag-handle:focus-visible {color: var(--text); background: color-mix(in oklch, var(--muted-surface) 50%, transparent)}
+.panel-actions {margin-left: auto; flex: none; gap: 2px; opacity: 0; transition: opacity 150ms}
+.chart-card:is(:hover, :focus-within) .panel-actions, .panel-actions:has([aria-expanded="true"]) {opacity: 1}
+.panel-actions .icon-button {width: 24px; min-width: 24px; height: 24px; padding: 5px}
+.panel-actions svg {width: 14px; height: 14px}
+.panel-indicators {margin-left: auto; flex: none}
+.chart-legend {justify-content: center; gap: 4px 12px; margin: 1px 0 4px}
+.legend-item {font-size: 11px; color: var(--muted)}
+.chart-host {--chart-base-height: 220px}
+.chart-card.table-card {padding: 6px 8px}
+.chart-tooltip {padding: 0; border: 1px solid var(--line); border-radius: 6px; box-shadow: none; font-size: 12px}
+.chart-tooltip-header {padding: 6px 10px; border-bottom: 1px solid var(--line)}
+.chart-tooltip-row {margin: 0; padding: 4px 10px; border-radius: 0}
+.chart-tooltip-row.is-selected {box-shadow: none; background: var(--muted-surface)}
+.chart-tooltip-label {color: var(--muted)}
+.chart-tooltip-value {font-family: ui-monospace, SFMono-Regular, monospace; font-weight: 400}
+.chart-tooltip-dot {width: 6px; height: 6px; border-radius: 50%; background: var(--run-color)}
+.sv-tooltip {border: 1px solid var(--line); border-radius: 6px; box-shadow: none}
+input::placeholder {color: color-mix(in oklch, var(--text) 65%, transparent); opacity: 1}
+input[type="search"] {color: var(--text)}
+.chart-toolbar {justify-content: flex-end}
+.run-name {flex-direction: column; justify-content: center}
+.run-observation {font-size: 10px; line-height: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+.unavailable-selected-run {display: flex; align-items: center; gap: 8px; padding: 6px; font-size: 12px}
+.runs-selector[data-compact="true"] .run-observation, .runs-selector[data-mobile-compact="true"] .run-observation {display: none}
+.filter-group-toolbar {gap: 6px 8px}
+.filter-group-separator {color: var(--muted); flex: none}
+.filter-radio-option[data-state="checked"] {background: var(--muted-surface); color: var(--text)}
+.filter-radio-option:focus-visible {outline: 1px solid var(--ring); outline-offset: 2px}
+.filter-radio-option span {background: transparent; box-shadow: none}
+.filter-editor-tabs {gap: 4px; padding: 4px; border: 0; height: auto; margin-bottom: 12px}
+.filter-editor-tab {border: 0; border-radius: 4px; padding: 6px 12px}
+.filter-editor-tab[data-state="active"] {border: 0; background: var(--surface); color: var(--text); box-shadow: none}
+.filter-editor-tab::after {display: none}
+.filter-criteria {display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px}
+.filter-criteria .field {margin: 0; min-width: 0}
+.filter-criteria .field:last-child {grid-column: 1 / -1}
+.filter-dialog-actions {display: flex; justify-content: space-between; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line)}
+.chart-transform-settings {display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px; padding-top: 8px}
+.chart-transform-settings .field {margin: 0; min-width: 0}
+.chart-transform-settings input {min-height: 32px; accent-color: var(--primary)}
+.editor-appearance > summary::after {display: none}
+.editor-preview-pane {padding: 8px 12px}
+.editor-actions {flex-wrap: wrap; gap: 8px}
+.editor-actions .metric-selection-count {flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+.editor-primary-actions {display: flex; flex: none; gap: 8px}
+.editor-actions .editor-error:not(:empty) {flex-basis: 100%}
+.chart-card[data-refreshing="true"] {animation: chart-refresh 1s ease-in-out infinite}
+.chart-card[data-refreshing="true"] .chart-status {position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap}
+@keyframes chart-refresh {
+  0%, 100% {border-color: var(--line)}
+  50% {border-color: color-mix(in oklch, var(--muted) 55%, var(--line))}
+}
+.button, .select {min-height: 32px; border: 1px solid transparent; border-radius: var(--radius-lg); padding: 5px 10px; font-size: 12px}
+.button.primary, .workspace-header .workspace-save {background: var(--primary); color: var(--primary-foreground); border-color: transparent}
+.button.primary:hover:not(:disabled) {background: color-mix(in oklch, var(--primary) 85%, transparent)}
+.icon-button {width: 32px; min-width: 32px; height: 32px; padding: 8px; border-radius: var(--radius-lg)}
+.icon-button > svg {width: 16px; height: 16px}
+.search-box, .text-input {border: 1px solid transparent; border-radius: var(--radius-lg); background: color-mix(in oklch, var(--muted-surface) 60%, transparent); font-size: 12px}
+.search-box {min-height: 32px; gap: 8px}
+.search-box input {height: 30px; padding: 0; border: 0; border-radius: 0; background: transparent; outline: none; box-shadow: none}
+.search-box input:focus-visible {outline: none; box-shadow: none}
+.search-box:focus-within, .text-input:focus-visible, .select:focus-visible {outline: none; border-color: color-mix(in oklch, var(--ring) 40%, transparent); box-shadow: none}
+.select {background-color: transparent}
+.select option {background: var(--surface); color: var(--text)}
+.menu-content {border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow)}
+.menu-item {font-size: 12px; min-height: 30px; padding: 6px 8px; border-radius: var(--radius-lg)}
+.dialog {margin: auto; border: 1px solid var(--line); border-radius: calc(var(--radius) * 1.8); box-shadow: var(--shadow)}
+.dialog::backdrop {background: rgb(0 0 0 / 10%); backdrop-filter: none}
+.dialog-header {padding: 16px 16px 8px; gap: 12px}
+.dialog-header > h2 {font-size: 16px; line-height: 20px; font-weight: 500}
+.dialog-body {padding: 8px 16px 16px}
+.dialog-body > p {font-size: 13px}
+.chart-editor {height: min(640px, calc(100svh - 24px)); max-height: calc(100svh - 24px); padding: 0; gap: 0}
+.chart-editor.section-only {height: auto}
+.chart-editor .dialog-header, .editor-actions {padding: 8px 12px}
+.chart-editor .dialog-header {padding-right: 44px; gap: 8px}
+.chart-editor .dialog-header > h2 {font-size: 14px}
+.chart-editor .add-mode-settings {gap: 4px}
+.chart-editor .add-mode-settings .select {width: auto; max-width: 150px}
+.chart-editor .dialog-body {padding: 0}
+.editor-panes {grid-template-columns: 220px minmax(0, 1fr)}
+.editor-metrics {padding: 8px}
+.metric-results {margin-top: 6px}
+.metric-group {padding: 8px 6px 4px}
+.metric-option {gap: 6px; padding: 6px; margin-block: 2px}
+.collection-option {padding: 6px; margin-block: 2px}
+.chart-preview {min-height: 160px}
+.chart-preview .chart-host {height: 160px; --chart-base-height: 160px}
+.presentation-settings {padding: 8px 0}
+.presentation-settings, .appearance-settings {gap: 6px 8px}
+.presentation-settings .field, .appearance-settings .field {gap: 4px}
+.chart-editor .text-input, .chart-editor .select {height: 28px; min-height: 28px; font-size: 12px; padding-block: 4px}
+.chart-editor .field-label {font-size: 12px}
+.chart-editor .add-mode-bar {padding: 6px 8px}
+.chart-editor .add-type-tab {min-height: 28px; padding: 4px 6px; font-size: 12px}
+.editor-appearance {padding-bottom: 8px}
+.editor-appearance > summary {min-height: 28px; padding: 4px 0; font-size: 12px}
+.snapshot-binding-fields {gap: 6px 8px; padding-bottom: 8px}
+.snapshot-binding-fields .field {gap: 4px}
+.time-bounds {gap: 8px}
+.time-bounds .field {gap: 4px; margin-bottom: 0}
+.time-range-actions {display: flex; justify-content: flex-end; margin-top: 8px}
+.table-columns-dialog > .dialog-body {padding-top: 24px}
+@media (max-width: 700px) {
+  .chart-editor {height: min(680px, calc(100svh - 24px))}
+  .editor-panes {grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(90px, min(20svh, 150px)) minmax(0, 1fr)}
+}
+.panel-fullscreen {border: 0; border-radius: 0; margin: 0}
+.panel-fullscreen > .dialog-body {padding: 8px}
+.panel-fullscreen .chart-card {border: 0; box-shadow: none; padding: 8px}
+.chart-preview .chart-card {border: 0; box-shadow: none; padding: 0}
+.chart-preview .panel-actions {display: none}
+.is-expanded .panel-actions {opacity: 1}
+@supports (appearance: base-select) {
+  .select::picker(select) {border: 1px solid var(--line); border-radius: 8px; padding: 4px; margin-block: 4px; box-shadow: var(--shadow)}
+  .select option {font-size: 12px; border-radius: var(--radius-lg); min-height: 30px; padding: 6px 8px; margin-block: 0}
+}
+@media (min-width: 1024px) {
+  .analysis-layout[data-collapsed="true"] {grid-template-columns: 64px minmax(0, 1fr)}
+  .runs-panel[data-collapsed="true"] .runs-panel-brand {display: none}
+  .runs-panel[data-collapsed="true"] .runs-panel-header {justify-content: center}
+  .runs-panel[data-collapsed="true"] .runs-panel-footer {flex-direction: column}
+  .runs-panel[data-collapsed="true"] .runs-live {margin: 0; width: 32px; padding-inline: 0}
+  .runs-panel[data-collapsed="true"] .connection-host {max-width: 32px}
+  .runs-panel[data-collapsed="true"] .connection-label {display: none}
+  .analysis-layout[data-collapsed="true"] .sidebar-resizer {display: none}
+  .runs-selector[data-compact="true"] .run-filters {display: none}
+  .runs-selector[data-compact="true"] .run-name,
+  .runs-selector[data-compact="true"] .run-status,
+  .runs-selector[data-compact="true"] .run-detail-button {display: none}
+  .runs-selector[data-compact="true"] .run-row {justify-content: center; padding-inline: 0}
+  .runs-selector[data-compact="true"] .run-choice {flex: none; justify-content: center}
+  .runs-selector[data-compact="true"] .run-viewport {scrollbar-width: none}
+}
+@media (max-width: 1023px) {
+  .app-content {padding: 12px 16px; overflow: auto}
+  .analysis-layout {display: flex; flex-direction: column; gap: 12px; overflow: visible}
+  .runs-dock {display: block; width: 100%; height: auto; flex: none}
+  .runs-panel {height: auto; gap: 10px}
+  .runs-panel-toggle {display: none}
+  .runs-panel-mobile-toggle {display: inline-flex; margin-left: auto}
+  .runs-panel-footer {border: 0; padding-top: 0}
+  .runs-panel-content {flex: none; max-height: min(320px, 42svh); display: flex}
+  .runs-selector {width: 100%; flex: 1; min-height: 0; height: auto}
+  .runs-selector .run-viewport {height: var(--run-list-height); flex: 0 1 var(--run-list-height); contain: layout style}
+  .runs-selector .search-box {display: none}
+  .run-search-row {display: none}
+  .run-filters {grid-template-columns: repeat(2, minmax(0, 1fr))}
+  .runs-selector[data-mobile-compact="true"] .run-filters {display: none}
+  .runs-selector[data-mobile-compact="true"] .run-viewport {height: 36px; min-height: 36px; flex-basis: 36px; overflow: auto hidden}
+  .runs-selector[data-mobile-compact="true"] .run-rows {display: flex; align-items: center; gap: 6px; height: 36px}
+  .runs-selector[data-mobile-compact="true"] .run-row {position: static; transform: none !important; height: 32px; max-width: 240px; flex: none; background: var(--muted-surface); padding: 0 10px}
+  .runs-selector[data-mobile-compact="true"] .run-choice {height: 100%; margin: 0; min-width: 0}
+  .runs-selector[data-mobile-compact="true"] .run-status,
+  .runs-selector[data-mobile-compact="true"] .run-detail-button {display: none}
+  .run-row .run-detail-button {opacity: 1; pointer-events: auto}
+  .sidebar-resizer {display: none}
+  .workspace-page {flex: none; width: 100%; overflow: visible; gap: 16px}
+  .workspace-controls {display: grid; grid-template-columns: minmax(0, 1fr) auto auto; padding: 4px 6px; gap: 4px}
+  .workspace-header-host {grid-column: 1; grid-row: 1; min-width: 0}
+  .workspace-picker {flex: 1 1 0; min-width: 0; max-width: min(180px, 45vw)}
+  .workspace-save-slot {width: 52px}
+  .workspace-save-slot > .workspace-save {min-width: 0; max-width: 100%; padding-inline: 4px}
+  .workspace-save-slot > .workspace-save > span {overflow: hidden; text-overflow: ellipsis}
+  .workspace-save-slot > .workspace-save-status {max-width: 100%; padding-inline: 2px; overflow: hidden; text-overflow: ellipsis}
+  .workspace-save-status {font-size: 11px; padding-inline: 4px}
+  .chart-toolbar {display: contents}
+  .chart-axis-controls {grid-column: 1 / -1; grid-row: 2}
+  .chart-axis-choice {padding-inline: 5px}
+  .workspace-controls:has(.chart-toolbar > .select) .chart-axis-controls {grid-column: 1 / 3}
+  .chart-toolbar > .select {grid-column: 3; grid-row: 2}
+  .selection-strip {flex: 1 1 100%; order: 2}
+  .runs-control {display: none}
+  .run-chips {display: none}
+  .time-controls {grid-column: 2; grid-row: 1; min-width: 0}
+  .chart-actions {grid-column: 3; grid-row: 1; min-width: 0}
+  .chart-toolbar .button, .chart-toolbar .select {height: 32px; min-height: 32px; font-size: 12px; padding: 4px 8px}
+  .chart-toolbar .button > svg {display: block; width: 14px; height: 14px}
+  .collection-freshness {display: none}
+  .chart-scroll {overflow: visible; flex: none; padding: 0}
+  .chart-grid {gap: 16px; --normal-panel-span: 12}
+  .chart-grid > [data-panel-size] {grid-column: 1 / -1}
+  .chart-card, .chart-card.table-card {padding: 6px 8px}
+  .chart-host {--chart-base-height: 220px}
+  .panel-actions {opacity: 1}
+  .runs-sheet .run-filters, .runs-sheet .run-search-row {display: grid}
+  .runs-sheet .search-box {display: flex}
+}
+@media (hover: none), (pointer: coarse) {
+  .panel-actions {opacity: 1}
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-card[data-refreshing="true"] {animation: none; border-color: color-mix(in oklch, var(--muted) 55%, var(--line))}
+  .panel-actions, .sidebar-resizer::after {transition: none}
+}

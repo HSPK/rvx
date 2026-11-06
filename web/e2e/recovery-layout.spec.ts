@@ -1,5 +1,5 @@
 import {test, expect} from "@playwright/test";
-import {mockApi, runs, seedUiState, uiServer, type FixtureOptions} from "./fixtures";
+import {mockApi, runs, seedUiState, uiServer, setTheme, openRunManagement, type FixtureOptions} from "./fixtures";
 
 test("initial metadata and catalog retries show loading before recovering", async ({page}) => {
   const options: FixtureOptions = {failCatalog: true};
@@ -44,7 +44,7 @@ test("metadata recovery clears only its own notification and preserves preferenc
   await expect(notice).toBeHidden();
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   await page.route("**/api/ui/browser", route => route.fulfill({status: 503, json: {error: "Appearance could not be saved"}}));
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await expect(notice).toContainText("could not be saved");
   failMetadata = true;
   await refresh.click();
@@ -126,7 +126,7 @@ test("newer workspace messages float outside the layout and dismiss without chan
   } finally {release();}
 });
 
-test("run sheets fit empty, short and large lists without moving the search field", async ({page}) => {
+test("mobile run panels fit empty, short and virtualized large lists without a search field", async ({page}) => {
   await mockApi(page, {runCount: 10_000});
   let count = 0;
   await page.route("**/api/experiments/runs", route => count > 4 ? route.fallback() : route.fulfill({json: {runs: runs.slice(0, count)}}));
@@ -135,8 +135,8 @@ test("run sheets fit empty, short and large lists without moving the search fiel
   for (const size of [0, 1, 4, 10_000]) {
     count = size;
     await page.goto("/rvx?runs=");
-    await page.getByRole("button", {name: "Select runs (0 selected)"}).click();
-    const sheet = page.getByRole("dialog", {name: "Runs", exact: true});
+    await openRunManagement(page);
+    const sheet = page.locator(".runs-dock");
     await expect(sheet).toBeVisible();
     const box = (await sheet.boundingBox())!;
     expect(box.y).toBeGreaterThanOrEqual(0);
@@ -155,15 +155,11 @@ test("run sheets fit empty, short and large lists without moving the search fiel
       expect(await sheet.locator(".run-row").count()).toBeLessThanOrEqual(32);
       await sheet.locator(".run-viewport").evaluate(node => {node.scrollTop = node.scrollHeight;});
       await expect(sheet.getByRole("checkbox", {name: "Select training-09999"})).toBeVisible();
-      const search = sheet.getByRole("searchbox", {name: "Search runs"});
-      const before = (await search.boundingBox())!.y;
-      await search.fill("training-09999");
-      await expect(sheet.locator(".run-row")).toHaveCount(1);
-      expect(Math.abs((await search.boundingBox())!.y - before)).toBeLessThanOrEqual(1);
+      await expect(sheet.getByRole("searchbox", {name: "Search runs"})).toBeHidden();
       expect((await sheet.boundingBox())!.height).toBeLessThan(540);
       await page.screenshot({path: "artifacts/adaptive-run-sheet-filtered.png"});
     }
-    await sheet.getByRole("button", {name: "Close", exact: true}).click();
+    await sheet.getByRole("button", {name: "Manage runs", exact: true}).click();
   }
 });
 
@@ -193,31 +189,31 @@ test("breakpoint changes move one selector without resetting plots, zoom or keyb
       return Math.abs(plot!.height - host!.height);
     }).toBeLessThanOrEqual(1);
     if ([1100, 901, 900, 390].includes(width)) {
-      await expect.poll(() => page.locator(".chart-grid > [data-panel-id]").evaluateAll(nodes => {
+      await expect.poll(() => page.locator(".chart-grid [data-panel-id]").evaluateAll(nodes => {
         const top = nodes[0]!.getBoundingClientRect().top;
         return nodes.filter(node => Math.abs(node.getBoundingClientRect().top - top) < 1).length;
-      })).toBe(width === 901 || width === 390 ? 1 : 2);
+      })).toBe(width <= 1023 ? 1 : 2);
     }
     await expect(page.locator(".runs-selector")).toHaveCount(1);
     expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
     await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
   }
-  await page.getByRole("button", {name: "Select runs (2 selected)"}).click();
-  await expect(page.getByRole("dialog", {name: "Runs", exact: true})).toBeVisible();
+  await openRunManagement(page);
+  await expect(page.getByRole("button", {name: "Manage runs", exact: true})).toHaveAttribute("aria-expanded", "true");
   await page.setViewportSize({width: 901, height: 900});
   await expect(page.getByRole("dialog", {name: "Runs", exact: true})).toHaveCount(0);
   await expect(page.locator(".runs-dock")).toBeVisible();
-  await expect(page.getByRole("searchbox", {name: "Search runs"})).toBeFocused();
+  await expect(page.getByRole("searchbox", {name: "Search runs"})).toBeHidden();
   await page.setViewportSize({width: 1800, height: 900});
-  await expect.poll(() => page.locator(".chart-grid > [data-panel-id]").evaluateAll(nodes => {
+  await expect.poll(() => page.locator(".chart-grid [data-panel-id]").evaluateAll(nodes => {
     const top = nodes[0]!.getBoundingClientRect().top;
     return nodes.filter(node => Math.abs(node.getBoundingClientRect().top - top) < 1).length;
-  })).toBe(3);
+  })).toBe(4);
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
   await page.setViewportSize({width: 844, height: 390});
-  await page.getByRole("button", {name: "Select runs (2 selected)"}).click();
-  const sheet = page.getByRole("dialog", {name: "Runs", exact: true});
+  await openRunManagement(page);
+  const sheet = page.locator(".runs-dock");
   await expect(sheet.getByRole("button", {name: "Refresh runs"})).toBeVisible();
   expect((await sheet.locator(".run-viewport").boundingBox())!.height).toBeGreaterThan(100);
   await sheet.getByRole("checkbox", {name: "Select ppo · small batch"}).check();

@@ -13,7 +13,7 @@ test("server-rendered dark mode never paints light during delayed session and pr
     const response = await route.fetch();
     await route.fulfill({response, body: (await response.text())
       .replace('data-theme="light"', 'data-theme="dark"')
-      .replace('content="#f6f7f9"', 'content="#171b23"')});
+      .replace('content="#f3f4f6"', 'content="#0e1014"')});
   });
   await page.addInitScript(() => {
     const frames: {theme: string | undefined; html: string; surface: string}[] = [];
@@ -38,11 +38,11 @@ test("server-rendered dark mode never paints light during delayed session and pr
     await page.goto("/rvx?runs=run-1", {waitUntil: "commit"});
     await expect(page.locator(".auth-page")).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-    await expect(page.locator(".auth-page")).toHaveCSS("background-color", "rgb(23, 27, 35)");
+    await expect(page.locator(".auth-page")).toHaveCSS("background-color", "rgb(14, 16, 20)");
     await page.screenshot({path: "artifacts/dark-before-session.png"});
     releaseSession();
-    await expect(page.getByRole("heading", {name: "Loading workspace settings"})).toBeVisible();
-    await expect(page.getByRole("button", {name: "Switch to light appearance"})).toBeVisible();
+    await expect(page.getByRole("heading", {name: "Loading workspace…"})).toBeVisible();
+    await expect(page.getByRole("button", {name: "Workspace settings", exact: true})).toHaveCount(0);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await page.screenshot({path: "artifacts/dark-before-preferences.png"});
     releasePreferences();
@@ -52,9 +52,9 @@ test("server-rendered dark mode never paints light during delayed session and pr
     await expect(page.locator(".chart-card canvas")).toBeVisible();
     const frames = await page.evaluate(() => Reflect.get(window, "themePaints") as {theme: string; html: string; surface: string}[]);
     expect(frames.length).toBeGreaterThan(0);
-    expect(frames.every(frame => frame.theme === "dark" && frame.html === "rgb(23, 27, 35)")).toBe(true);
-    expect(frames.some(frame => ["rgb(255, 255, 255)", "rgb(246, 247, 249)"].includes(frame.surface))).toBe(false);
-    expect(await page.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
+    expect(frames.every(frame => frame.theme === "dark" && frame.html === "rgb(14, 16, 20)")).toBe(true);
+    expect(frames.some(frame => ["rgb(255, 255, 255)", "rgb(243, 244, 246)"].includes(frame.surface))).toBe(false);
+    expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key !== "rvx-runs-panel-v1").length + sessionStorage.length)).toBe(0);
   } finally {releaseSession(); releasePreferences();}
 });
 
@@ -66,7 +66,7 @@ test("an explicit light document overrides dark system preference during startup
   await page.route("**/api/auth/session", async route => {await pending; await route.fallback();});
   try {
     await page.goto("/rvx?runs=run-1", {waitUntil: "commit"});
-    await expect(page.locator(".auth-page")).toHaveCSS("background-color", "rgb(246, 247, 249)");
+    await expect(page.locator(".auth-page")).toHaveCSS("background-color", "rgb(243, 244, 246)");
     release();
     await expect(page.locator(".chart-card canvas").first()).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");

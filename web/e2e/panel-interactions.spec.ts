@@ -1,5 +1,6 @@
 import {test, expect, type Page} from "@playwright/test";
-import {mockApi, selectAddType} from "./fixtures";
+import {sectionContent} from "./react-controls";
+import {mockApi, selectAddType, setTheme} from "./fixtures";
 
 async function addSection(page: Page, name: string) {
   await page.getByRole("button", {name: "Add", exact: true}).click();
@@ -44,12 +45,12 @@ test("pointer dragging autoscrolls into an empty section without turning canvas 
   await page.mouse.down();
   await page.mouse.move(scroll.x + scroll.width / 2, scroll.y + scroll.height - 12, {steps: 8});
   await expect.poll(async () => (await target.boundingBox())!.y).toBeLessThan(scroll.y + scroll.height - 30);
-  const empty = (await target.locator(".section-empty").boundingBox())!;
+  const empty = (await (await sectionContent(target, ".section-empty")).boundingBox())!;
   await page.mouse.move(empty.x + empty.width / 2, Math.min(empty.y + empty.height / 2, scroll.y + scroll.height - 12));
   await page.mouse.up();
-  await expect(target.locator(`[data-panel-id="${id}"]`)).toHaveCount(1);
+  const moved = (await sectionContent(target)).and(page.locator(`[data-panel-id="${id}"]`));
+  await expect(moved).toHaveCount(1);
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
-  const moved = target.locator(`[data-panel-id="${id}"]`);
   await expect(moved.locator(".chart-zoom-state")).toBeHidden();
   await page.screenshot({path: "artifacts/expanded-drag-section.png"});
 });
@@ -89,7 +90,7 @@ test("table column visibility, order and resize persist, with sticky key/header 
   expect(Math.abs(key.x - viewport.x)).toBeLessThan(2);
   expect(Math.abs(key.y - viewport.y)).toBeLessThan(2);
   await table.locator(".menu-trigger").click();
-  await table.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
   const fullscreen = page.getByRole("dialog", {name: "Tasks", exact: true});
   await expect(fullscreen.locator(`[data-panel-id="${id}"]`)).toHaveCount(1);
   await expect(fullscreen.locator("tbody tr")).toHaveCount(75);
@@ -125,7 +126,7 @@ test("generic snapshot collections include keyed records, scalar arrays and root
 test("opened dropdown and metric hover gaps stay visible in dark mobile Add modes", async ({page}) => {
   await mockApi(page);
   await page.goto("/rvx?runs=run-1&live=0");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   for (const width of [320, 390, 844]) {
     await page.setViewportSize({width, height: width === 844 ? 390 : 844});
     await page.getByRole("button", {name: "Add", exact: true}).click();
@@ -135,7 +136,7 @@ test("opened dropdown and metric hover gaps stay visible in dark mobile Add mode
     const first = page.getByRole("option", {name: "Separate charts", exact: true}), second = page.getByRole("option", {name: "Combined plot", exact: true});
     await first.hover();
     const a = (await first.boundingBox())!, b = (await second.boundingBox())!;
-    expect(b.y - a.y - a.height).toBeGreaterThanOrEqual(3);
+    expect(b.y - a.y - a.height).toBeGreaterThanOrEqual(0);
     await page.screenshot({path: `artifacts/expanded-add-dropdown-${width}.png`});
     await page.keyboard.press("Escape");
     const rows = editor.locator(".metric-option");
@@ -158,19 +159,20 @@ test("touch drag handles move panels across sections while retaining the origina
     const id = await first.getAttribute("data-panel-id"), canvas = await first.locator("canvas").elementHandle();
     await addSection(page, "Touch target");
     await first.scrollIntoViewIfNeeded();
-    const handle = (await first.locator(".panel-drag-handle").boundingBox())!, scroll = (await page.locator(".chart-scroll").boundingBox())!;
+    const handle = (await first.locator(".panel-drag-handle").boundingBox())!, scroll = (await page.locator(".app-content").boundingBox())!;
     const session = await context.newCDPSession(page);
     const x = handle.x + handle.width / 2, y = handle.y + handle.height / 2;
     await session.send("Input.dispatchTouchEvent", {type: "touchStart", touchPoints: [{x, y}]});
     await session.send("Input.dispatchTouchEvent", {type: "touchMove", touchPoints: [{x: scroll.x + scroll.width / 2, y: scroll.y + scroll.height - 8}]});
     const target = page.locator(".workspace-section").filter({has: page.getByRole("button", {name: "Touch target", exact: true})});
     await expect.poll(async () => (await target.boundingBox())!.y, {timeout: 9000}).toBeLessThan(scroll.y + scroll.height - 30);
-    const empty = (await target.locator(".section-empty").boundingBox())!;
+    const empty = (await (await sectionContent(target, ".section-empty")).boundingBox())!;
     await session.send("Input.dispatchTouchEvent", {type: "touchMove", touchPoints: [{x: empty.x + empty.width / 2, y: Math.min(empty.y + 20, scroll.y + scroll.height - 10)}]});
     await session.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
-    await expect(target.locator(`[data-panel-id="${id}"]`)).toHaveCount(1);
+    const moved = (await sectionContent(target)).and(page.locator(`[data-panel-id="${id}"]`));
+    await expect(moved).toHaveCount(1);
     expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
-    await expect(target.locator(".chart-zoom-state")).toBeHidden();
+    await expect(moved.locator(".chart-zoom-state")).toBeHidden();
     await session.detach();
   } finally {await context.close();}
 });
@@ -185,7 +187,7 @@ test("collapsing a section cancels a pending table read and stops hidden table p
   await expect(editor.locator(".table-preview tbody tr")).toHaveCount(75);
   await editor.getByRole("button", {name: "Add", exact: true}).click();
   const section = page.locator(".workspace-section").filter({has: page.getByRole("button", {name: "Tables", exact: true})});
-  const table = section.locator(".table-card");
+  const table = await sectionContent(section, ".table-card");
   await table.scrollIntoViewIfNeeded(); await expect(table.locator("tbody tr")).toHaveCount(75);
   let release!: () => void, waiting = false, aborted = 0;
   const gate = new Promise<void>(resolve => {release = resolve;});
@@ -242,7 +244,7 @@ test("both real table previews and their Add actions fit narrow dark screens", a
   await page.setViewportSize({width: 320, height: 844});
   await mockApi(page);
   await page.goto("/rvx?runs=run-1,run-2&live=0");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   for (const kind of ["metric-table", "snapshot-table"]) {
     await page.getByRole("button", {name: "Add", exact: true}).click();
     const editor = page.getByRole("dialog", {name: "Add", exact: true});

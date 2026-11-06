@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 import {copyPanel, validPanel, type SnapshotTablePanel} from "./panels";
-import {copySnapshotView, snapshotViewError, suggestSnapshotViews, validSnapshotView} from "./snapshot-config";
+import {copySnapshotView, snapshotEditorViews, snapshotViewError, suggestSnapshotViews, validSnapshotView} from "./snapshot-config";
 import type {SnapshotBarView, SnapshotStatusView} from "../domain/snapshot-views";
 import type {TableDefinition} from "../domain/tables";
 
@@ -74,5 +74,19 @@ describe("typed snapshot visual configurations", () => {
     expect(suggestSnapshotViews(scalar).status.idPaths).toEqual([]);
     expect(suggestSnapshotViews(scalar).bar).toMatchObject({categoryPath: "$value", aggregation: "count", valuePaths: []});
     expect(suggestSnapshotViews({...scalar, collection_kinds: ["object"]}).status.idPaths).toEqual(["$key"]);
+  });
+  it("initializes the alternate edit view from discovered fields without overwriting saved mappings", () => {
+    const fromBar = snapshotEditorViews(table, bar);
+    expect(fromBar.bar).toEqual(bar);
+    expect(fromBar.status).toMatchObject({idPaths: ["/id"], statusPath: "/status"});
+    expect(snapshotViewError(fromBar.status)).toBe("");
+    const fromStatus = snapshotEditorViews(table, status);
+    expect(fromStatus.status).toEqual(status);
+    expect(fromStatus.bar).toMatchObject({categoryPath: "/name", valuePaths: ["/running_gpus"]});
+    expect(snapshotViewError(fromStatus.bar)).toBe("");
+    fromBar.bar.valuePaths.push("/other");
+    fromStatus.status.idPaths.push("/other");
+    expect(bar.valuePaths).toEqual(["/running_gpus"]);
+    expect(status.idPaths).toEqual(["/id"]);
   });
 });

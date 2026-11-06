@@ -1,3 +1,4 @@
+import {selectOption} from "./react-controls";
 import {test, expect} from "@playwright/test";
 import {mkdir, writeFile} from "node:fs/promises";
 import {exactId, firstObservation, mockApi, selectedObservation, serverState, type FixtureOptions} from "./fixtures";
@@ -57,13 +58,13 @@ test("hidden pages stop steady polls and logical bounds retain their original in
   await page.waitForTimeout(200);
   const count = requests.length; await page.waitForTimeout(5500); expect(requests.length).toBe(count);
   await page.evaluate(() => {Object.defineProperty(document, "hidden", {value: false, configurable: true}); document.dispatchEvent(new Event("visibilitychange"));});
-  await page.getByRole("combobox", {name: "Time range"}).selectOption("custom");
-  await page.getByRole("combobox", {name: "Alignment"}).selectOption("optimizer_step");
+  await page.getByRole("radiogroup", {name: "X axis"}).getByRole("radio", {name: "Optimizer step", exact: true}).click();
+  await selectOption(page.getByRole("combobox", {name: "Time range"}), "custom");
   await page.getByRole("textbox", {name: "From (Optimizer step)"}).fill("100");
   await page.getByRole("textbox", {name: "To (Optimizer step)"}).fill("600");
   await page.getByRole("button", {name: "Apply time settings"}).click();
-  await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.axis).toBe("optimizer_step");
-  expect(requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body).toMatchObject({from: 100, to: 600});
+  await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body)
+    .toMatchObject({axis: "optimizer_step", from: 100, to: 600});
 });
 
 test("waiting, nonnumeric and failed refresh states remain distinct", async ({page}) => {
@@ -88,7 +89,7 @@ test("visible-first chart projections stop when the page is hidden", async ({pag
   await page.goto("/rvx?runs=run-1");
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
   const visible = await page.locator(".chart-card").evaluateAll(cards => {
-    const root = document.querySelector(".chart-scroll")!.getBoundingClientRect();
+    const root = document.querySelector(".app-content")!.getBoundingClientRect();
     return cards.filter(card => {const box = card.getBoundingClientRect(); return box.bottom > root.top && box.top < root.bottom;})
       .map(card => (card as HTMLElement).dataset.path);
   });

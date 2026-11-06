@@ -6,6 +6,7 @@ import type {ChartSpec} from "../src/app/model";
 import type {WorkspaceSet} from "../src/app/panels";
 import type {BrowserPreferences, WorkspaceDocument} from "../src/app/preferences";
 import type {BrowserContext} from "@playwright/test";
+import {selectOption} from "./react-controls";
 
 export interface MockUiServer {
   workspaces: WorkspaceDocument;
@@ -14,6 +15,33 @@ export interface MockUiServer {
   mutations: Map<string, {body: string; result: WorkspaceDocument | BrowserPreferences}>;
 }
 const servers = new WeakMap<Page, MockUiServer>();
+
+export async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
+  if (await page.locator("html").getAttribute("data-theme") === theme) return;
+  await page.getByRole("button", {name: `Switch to ${theme} appearance`, exact: true}).click();
+}
+
+export async function setPanelWidth(page: Page, width: string, panel = page.locator(".chart-card").first()): Promise<void> {
+  await panel.locator(".menu-trigger").click();
+  await page.getByRole("menuitem", {name: /^Edit /}).click();
+  const editor = page.getByRole("dialog", {name: /^Edit (chart|table|snapshot)$/});
+  await selectOption(editor.getByRole("combobox", {name: "Panel width", exact: true}), width);
+  await editor.getByRole("button", {name: "Save changes", exact: true}).click();
+}
+
+export async function openRunDetails(page: Page, id: string): Promise<void> {
+  const expand = page.getByRole("button", {name: "Expand Runs panel", exact: true});
+  if (await expand.isVisible()) await expand.click();
+  const manage = page.getByRole("button", {name: "Manage runs", exact: true});
+  if (await manage.isVisible() && await manage.getAttribute("aria-expanded") === "false") await manage.click();
+  const row = page.locator(`.run-row[data-run-id="${id}"]`);
+  await row.hover();
+  await row.getByRole("button", {name: /^Run details/}).click();
+}
+export async function openRunManagement(page: Page): Promise<void> {
+  const toggle = page.getByRole("button", {name: "Manage runs", exact: true});
+  if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
+}
 export function uiServer(page: Page): MockUiServer {
   let server = servers.get(page);
   if (!server) {

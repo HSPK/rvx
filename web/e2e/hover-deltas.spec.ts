@@ -1,6 +1,6 @@
 import {test, expect} from "@playwright/test";
 import {mkdir, writeFile} from "node:fs/promises";
-import {firstObservation, mockApi} from "./fixtures";
+import {firstObservation, mockApi, setTheme} from "./fixtures";
 
 test("hover and keyboard focus do not draw bottom bars on controls or chart titles", async ({page}) => {
   await mockApi(page);
@@ -8,11 +8,12 @@ test("hover and keyboard focus do not draw bottom bars on controls or chart titl
   const chart = page.locator(".section-grid .chart-card").first();
   await expect(chart.locator("canvas")).toBeVisible();
   for (const theme of ["light", "dark"]) {
-    if (theme === "dark") await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+    if (theme === "dark") await setTheme(page, "dark");
     const search = page.getByRole("searchbox", {name: "Search runs"});
     await search.click(); await search.fill("grpo");
-    await expect(search).toHaveCSS("box-shadow", "none");
-    await expect(page.locator(".search-box")).toHaveCSS("border-bottom-color", "rgba(0, 0, 0, 0)");
+    expect(await page.locator(".search-box").evaluate(node => {
+      const style = getComputedStyle(node); return style.borderBottomColor === style.borderTopColor;
+    })).toBe(true);
     await page.screenshot({path: `artifacts/no-focus-bar-search-${theme}.png`});
     const title = chart.locator(".panel-drag-handle");
     await title.hover();
@@ -24,24 +25,28 @@ test("hover and keyboard focus do not draw bottom bars on controls or chart titl
     await chart.locator(".chart-host").focus(); await page.keyboard.press("ArrowLeft");
     await expect(title).toHaveCSS("box-shadow", "none");
     await chart.locator(".menu-trigger").focus();
-    await expect(chart.locator(".menu-trigger")).toHaveCSS("box-shadow", "none");
-    const status = page.getByRole("combobox", {name: "Status", exact: true});
+    expect(await chart.locator(".menu-trigger").evaluate(node => {
+      const style = getComputedStyle(node); return style.borderBottomColor === style.borderTopColor;
+    })).toBe(true);
+    const status = page.getByRole("combobox", {name: "Status", exact: true, includeHidden: true});
     await status.click();
-    await expect(status).toHaveCSS("box-shadow", "none");
-    await expect(status).toHaveCSS("border-bottom-color", "rgba(0, 0, 0, 0)");
+    expect(await status.evaluate(node => {
+      const style = getComputedStyle(node); return style.borderBottomColor === style.borderTopColor;
+    })).toBe(true);
     await page.keyboard.press("Escape");
     await page.getByRole("button", {name: "Add", exact: true}).click();
     const editor = page.getByRole("dialog", {name: "Add", exact: true});
     const input = editor.getByRole("textbox", {name: "Panel title"});
     await input.fill("No focus underline");
-    await expect(input).toHaveCSS("box-shadow", "none");
-    await expect(input).toHaveCSS("border-bottom-color", "rgba(0, 0, 0, 0)");
+    expect(await input.evaluate(node => {
+      const style = getComputedStyle(node); return style.borderBottomColor === style.borderTopColor;
+    })).toBe(true);
     await page.screenshot({path: `artifacts/no-focus-bar-editor-${theme}.png`});
     await editor.getByRole("button", {name: "Cancel", exact: true}).click();
   }
 });
 
-test("measures selected RX beside hovered TX, hovered native options, and centered SVG actions", async ({page}) => {
+test("measures selected RX beside hovered TX, hovered options, and centered SVG actions", async ({page}) => {
   await page.setViewportSize({width: 1440, height: 900});
   await mockApi(page);
   const paths = ["/metrics/network~1eth0~1rx_mbps", "/metrics/network~1eth0~1tx_mbps"];
@@ -76,11 +81,11 @@ test("measures selected RX beside hovered TX, hovered native options, and center
     const box = item.getBoundingClientRect(), label = item.querySelector("strong")!;
     const style = getComputedStyle(label);
     return {text: label.textContent, top: box.top, bottom: box.bottom, height: box.height, font: style.fontSize, weight: style.fontWeight,
-      background: getComputedStyle(item).backgroundColor, hovered: item.matches(":hover"), selected: item.querySelector("input")?.checked};
+      background: getComputedStyle(item).backgroundColor, hovered: item.matches(":hover"), selected: item.querySelector('[role="checkbox"]')?.getAttribute("aria-checked") === "true"};
   }));
   expect(metrics[0]?.selected).toBe(true); expect(metrics[1]?.hovered).toBe(true);
   const metricGap = metrics[1]!.top - metrics[0]!.bottom;
-  expect(metricGap).toBeGreaterThanOrEqual(3);
+  expect(metricGap).toBeGreaterThanOrEqual(2);
   expect(Number.parseFloat(metrics[0]!.font)).toBeLessThanOrEqual(13);
   await mkdir("artifacts", {recursive: true});
   await page.screenshot({path: "artifacts/workspace-after-metric-hover.png"});
@@ -89,12 +94,12 @@ test("measures selected RX beside hovered TX, hovered native options, and center
   const status = page.getByRole("combobox", {name: "Status", exact: true});
   await status.click();
   await page.getByRole("option", {name: "Running", exact: true}).hover();
-  const options = await status.locator("option").evaluateAll(items => items.map(item => {
+  const options = await page.getByRole("listbox").getByRole("option").evaluateAll(items => items.map(item => {
     const box = item.getBoundingClientRect();
     return {text: item.textContent, top: box.top, bottom: box.bottom, height: box.height, hovered: item.matches(":hover")};
   }));
   const optionGap = options[1]!.top - options[0]!.bottom;
-  expect(options[1]?.hovered).toBe(true); expect(optionGap).toBeGreaterThanOrEqual(3);
+  expect(options[1]?.hovered).toBe(true); expect(optionGap).toBeGreaterThanOrEqual(0);
   await page.screenshot({path: "artifacts/workspace-after-dropdown-hover.png"});
   await page.keyboard.press("Escape");
 

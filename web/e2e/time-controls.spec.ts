@@ -1,3 +1,4 @@
+import {expectControlValue, selectOption} from "./react-controls";
 import {test, expect} from "@playwright/test";
 import {mockApi} from "./fixtures";
 
@@ -13,12 +14,15 @@ test("opening and applying an unchanged preset retains its live window and zoom"
   await page.mouse.move(box.x + box.width - 25, box.y + 35, {steps: 4}); await page.mouse.up();
   const zoom = await chart.locator(".chart-host").getAttribute("aria-description");
   const range = page.getByRole("combobox", {name: "Time range", exact: true});
-  await range.selectOption("custom");
+  await selectOption(range, "custom");
   const settings = page.getByRole("dialog", {name: "Time settings"});
-  await expect(settings.getByLabel("From (elapsed)")).toHaveValue("1h 59m");
-  await expect(settings.getByLabel("To (elapsed)")).toHaveValue("2h 59m");
+  await expect(settings).toBeFocused();
+  await expect(settings.getByRole("combobox")).toHaveCount(0);
+  await expect(settings.getByLabel("From (elapsed)")).not.toBeFocused();
+  await expectControlValue(settings.getByLabel("From (elapsed)"), "1h 59m");
+  await expectControlValue(settings.getByLabel("To (elapsed)"), "2h 59m");
   await settings.getByRole("button", {name: "Apply time settings"}).click();
-  await expect(range).toHaveValue("3600");
+  await expectControlValue(range, "3600");
   await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
 });
 
@@ -27,9 +31,11 @@ test("every range preset and human elapsed bounds keep native multi-run coordina
   await page.goto("/rvx?runs=run-1,run-2&live=0");
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
   const range = page.getByRole("combobox", {name: "Time range", exact: true});
-  expect(await range.locator("option").allTextContents()).toEqual(["15m", "1h", "6h", "24h", "3d", "7d", "All", "Custom…"]);
+  await range.click();
+  await expect(page.getByRole("listbox").getByRole("option")).toHaveText(["15m", "1h", "6h", "24h", "3d", "7d", "All", "Custom…"]);
+  await page.keyboard.press("Escape");
   for (const value of ["900", "3600", "21600", "86400", "259200", "604800", "all"]) {
-    await range.selectOption(value);
+    await selectOption(range, value);
     const expectedFrom = value === "all" ? undefined : Math.max(0, 10740e9 - Number(value) * 1e9);
     if (value === "all") {
       expect(requests.some(request => request.path === "/api/snapshots/query" && request.body?.from === undefined && request.body?.to === undefined)).toBe(true);
@@ -39,15 +45,15 @@ test("every range preset and human elapsed bounds keep native multi-run coordina
     await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.axis).toBe("elapsed");
     expect(new URL(page.url()).searchParams.get("range")).toBe(value);
   }
-  await range.selectOption("custom");
+  await selectOption(range, "custom");
   const settings = page.getByRole("dialog", {name: "Time settings"});
   await settings.getByLabel("From (elapsed)").fill("1h 15m");
   await settings.getByLabel("To (elapsed)").fill("2h");
   await settings.getByRole("button", {name: "Apply time settings"}).click();
   await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.from).toBe(4500e9);
   expect(requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.to).toBe(7200e9);
-  await range.selectOption("custom");
-  await expect(settings.getByLabel("From (elapsed)")).toHaveValue("1h 15m");
+  await selectOption(range, "custom");
+  await expectControlValue(settings.getByLabel("From (elapsed)"), "1h 15m");
   await settings.getByLabel("To (elapsed)").fill("1h");
   await settings.getByRole("button", {name: "Apply time settings"}).click();
   await expect(settings.getByRole("alert")).toHaveText("The end must not be before the start.");
@@ -59,11 +65,11 @@ test("every range preset and human elapsed bounds keep native multi-run coordina
   await page.screenshot({path: "artifacts/human-elapsed-range.png"});
   await settings.getByRole("button", {name: "Apply time settings"}).click();
   await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.from).toBe(0);
-  await range.selectOption("custom");
+  await selectOption(range, "custom");
   await settings.getByLabel("From (elapsed)").fill("");
   await settings.getByLabel("To (elapsed)").fill("");
   await settings.getByRole("button", {name: "Apply time settings"}).click();
-  await expect(range).toHaveValue("all");
+  await expectControlValue(range, "all");
   await page.getByRole("button", {name: "Workspace sets"}).click();
   await expect(page.getByRole("dialog", {name: "Workspace sets"}).getByRole("button", {name: /time/i})).toHaveCount(0);
 });
@@ -74,12 +80,12 @@ test("local date controls submit wall time and preserve unchanged subsecond URL 
   await page.goto(`/rvx?runs=run-1&axis=wall_time&range=custom&from=${original}&live=0`);
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
   const range = page.getByRole("combobox", {name: "Time range", exact: true});
-  await range.selectOption("custom");
+  await selectOption(range, "custom");
   const settings = page.getByRole("dialog", {name: "Time settings"});
-  await expect(settings.getByLabel("From (local time)")).toHaveValue("2026-09-05T08:00");
+  await expectControlValue(settings.getByLabel("From (local time)"), "2026-09-05T08:00");
   await settings.getByRole("button", {name: "Apply time settings"}).click();
   expect(new URL(page.url()).searchParams.get("from")).toBe(String(original));
-  await range.selectOption("custom");
+  await selectOption(range, "custom");
   await settings.getByLabel("From (local time)").fill("2026-09-05T08:30:15");
   await settings.getByLabel("To (local time)").fill("2026-09-05T09:30:15");
   await page.screenshot({path: "artifacts/human-wall-range.png"});
@@ -95,14 +101,16 @@ test("nonexistent daylight-saving times and rounded logical integers fail explic
     await mockApi(page);
     await page.goto("/rvx?runs=run-1");
     await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
-    await page.getByRole("combobox", {name: "Time range", exact: true}).selectOption("custom");
+    const axes = page.getByRole("radiogroup", {name: "X axis", exact: true});
+    await axes.getByRole("radio", {name: "Time", exact: true}).click();
+    await selectOption(page.getByRole("combobox", {name: "Time range", exact: true}), "custom");
     const settings = page.getByRole("dialog", {name: "Time settings"});
-    const alignment = settings.getByRole("combobox", {name: "Alignment", exact: true});
-    await alignment.selectOption("wall_time");
     await settings.getByLabel("From (local time)").fill("2026-03-08T02:30");
     await settings.getByRole("button", {name: "Apply time settings"}).click();
     await expect(settings.getByRole("alert")).toHaveText("This local date or time does not exist.");
-    await alignment.selectOption("optimizer_step");
+    await page.keyboard.press("Escape");
+    await axes.getByRole("radio", {name: "Optimizer step", exact: true}).click();
+    await selectOption(page.getByRole("combobox", {name: "Time range", exact: true}), "custom");
     await settings.getByLabel("From (Optimizer step)").fill("9007199254740993");
     await settings.getByRole("button", {name: "Apply time settings"}).click();
     await expect(settings.getByRole("alert")).toContainText("too precise");
@@ -110,7 +118,7 @@ test("nonexistent daylight-saving times and rounded logical integers fail explic
     await settings.getByLabel("To (Optimizer step)").fill("600");
     await page.screenshot({path: "artifacts/human-logical-range-mobile.png"});
     await settings.getByRole("button", {name: "Apply time settings"}).click();
-    await expect(page.getByRole("combobox", {name: "Time range", exact: true})).toHaveValue("custom");
+    await expectControlValue(page.getByRole("combobox", {name: "Time range", exact: true}), "custom");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally {await context.close();}
 });

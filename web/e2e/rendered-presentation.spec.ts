@@ -1,3 +1,4 @@
+import {expectControlValue, selectOption} from "./react-controls";
 import {test, expect, type Locator, type Page} from "@playwright/test";
 import {mkdir, writeFile} from "node:fs/promises";
 import {mockApi, seedWorkspace, selectedObservation, serverState} from "./fixtures";
@@ -80,8 +81,8 @@ async function openLossEditor(page: Page): Promise<Locator> {
   const chart = page.locator('.chart-grid .chart-card[data-path="/progress/loss"]');
   await expect(chart.locator("canvas")).toBeVisible();
   await chart.getByRole("button", {name: "Policy loss chart options"}).click();
-  await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
-  const editor = page.getByRole("dialog", {name: "Edit panel", exact: true});
+  await page.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
+  const editor = page.getByRole("dialog", {name: /^Edit (chart|table|snapshot)$/, exact: true});
   await expect(editor.locator(".chart-preview canvas")).toBeVisible();
   if (!await editor.locator(".editor-appearance").evaluate(node => (node as HTMLDetailsElement).open)) {
     await editor.getByText("Appearance", {exact: true}).click();
@@ -98,7 +99,7 @@ test("line width, points, area fill, legend and Y limits alter actual preview an
   await editor.getByRole("textbox", {name: "Y minimum"}).fill("0");
   await editor.getByRole("textbox", {name: "Y maximum"}).fill("10");
   await editor.getByRole("spinbutton", {name: "Line width"}).fill("1");
-  await editor.getByRole("combobox", {name: "Points", exact: true}).selectOption("hide");
+  await selectOption(editor.getByRole("combobox", {name: "Points", exact: true}), "hide");
   const thin = await renderedPlot(preview);
   expect(thin.opaquePixels).toBeGreaterThan(100);
   expect(thin.lineY!).toBeCloseTo(.5, 1);
@@ -109,24 +110,24 @@ test("line width, points, area fill, legend and Y limits alter actual preview an
   expect(thick.opaquePixels).toBeGreaterThan(thin.opaquePixels * 2.5);
 
   await editor.getByRole("spinbutton", {name: "Line width"}).fill("1");
-  await editor.getByRole("combobox", {name: "Points", exact: true}).selectOption("show");
+  await selectOption(editor.getByRole("combobox", {name: "Points", exact: true}), "show");
   const points = await renderedPlot(preview);
   await page.screenshot({path: "artifacts/rendered-point-markers.png"});
   await mkdir("artifacts", {recursive: true});
   await writeFile("artifacts/rendered-marker-measurements.json", JSON.stringify({thin, thick, points}, null, 2));
   expect(points.coloredRows).toBeGreaterThan(thin.coloredRows);
 
-  await editor.getByRole("combobox", {name: "Points", exact: true}).selectOption("hide");
-  await editor.getByRole("combobox", {name: "Presentation", exact: true}).selectOption("area");
+  await selectOption(editor.getByRole("combobox", {name: "Points", exact: true}), "hide");
+  await selectOption(editor.getByRole("combobox", {name: "Presentation", exact: true}), "area");
   const area = await renderedPlot(preview);
   expect(area.translucentPixels).toBeGreaterThan(Math.max(1000, thin.translucentPixels * 10));
-  await editor.getByRole("combobox", {name: "Legend", exact: true}).selectOption("show");
+  await selectOption(editor.getByRole("combobox", {name: "Legend", exact: true}), "show");
   await expect(preview.locator(".chart-legend")).toBeVisible();
-  await editor.getByRole("combobox", {name: "Legend", exact: true}).selectOption("hide");
+  await selectOption(editor.getByRole("combobox", {name: "Legend", exact: true}), "hide");
   await expect(preview.locator(".chart-legend")).toBeHidden();
-  await editor.getByRole("combobox", {name: "Legend", exact: true}).selectOption("show");
+  await selectOption(editor.getByRole("combobox", {name: "Legend", exact: true}), "show");
   await editor.getByRole("spinbutton", {name: "Line width"}).fill("5");
-  await editor.getByRole("combobox", {name: "Points", exact: true}).selectOption("show");
+  await selectOption(editor.getByRole("combobox", {name: "Points", exact: true}), "show");
   await page.screenshot({path: "artifacts/rendered-display-preview.png"});
   await editor.getByRole("button", {name: "Save changes"}).click();
 
@@ -214,14 +215,14 @@ test("invalid Y bounds cannot commit, and Cancel preserves nested saved settings
   await chart.locator(".chart-host").focus(); await page.keyboard.press("ArrowRight");
   const id = await selectedObservation(chart).getAttribute("data-snapshot-id");
   await chart.getByRole("button", {name: "Original display chart options"}).click();
-  await chart.getByRole("menuitem", {name: "Edit chart"}).click();
-  const editor = page.getByRole("dialog", {name: "Edit panel", exact: true});
+  await page.getByRole("menuitem", {name: "Edit chart"}).click();
+  const editor = page.getByRole("dialog", {name: /^Edit (chart|table|snapshot)$/, exact: true});
   await expect(editor.locator(".chart-preview canvas")).toBeVisible();
   await editor.getByRole("textbox", {name: "Panel title"}).fill("Uncommitted title");
-  await editor.getByRole("combobox", {name: "Presentation", exact: true}).selectOption("line");
+  await selectOption(editor.getByRole("combobox", {name: "Presentation", exact: true}), "line");
   await editor.getByRole("spinbutton", {name: "Line width"}).fill("5");
-  await editor.getByRole("combobox", {name: "Points", exact: true}).selectOption("hide");
-  await editor.getByRole("combobox", {name: "Legend", exact: true}).selectOption("hide");
+  await selectOption(editor.getByRole("combobox", {name: "Points", exact: true}), "hide");
+  await selectOption(editor.getByRole("combobox", {name: "Legend", exact: true}), "hide");
   const lower = editor.getByRole("textbox", {name: "Y minimum"}), upper = editor.getByRole("textbox", {name: "Y maximum"});
   for (const [min, max, message] of [
     ["Infinity", "", "finite"], ["", "-Infinity", "finite"], ["NaN", "", "finite"],
@@ -263,10 +264,7 @@ test.describe("wall-time axis display", () => {
     const readCount = requests.filter(request => request.path === "/api/snapshots/query").length;
     const range = page.getByRole("combobox", {name: "Time range", exact: true});
     const choose = async (format: string): Promise<void> => {
-      await range.selectOption("custom");
-      const settings = page.getByRole("dialog", {name: "Time settings", exact: true});
-      await settings.getByRole("combobox", {name: "X-axis labels", exact: true}).selectOption(format);
-      await settings.getByRole("button", {name: "Apply time settings"}).click();
+      await selectOption(page.getByRole("combobox", {name: "X-axis labels", exact: true}), format);
       await page.clock.runFor(80);
     };
     await choose("time");
@@ -278,7 +276,7 @@ test.describe("wall-time axis display", () => {
     expect(dates.length).toBeGreaterThan(0);
     expect(dates.every(label => /^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
     expect(new Set(dates).size).toBe(dates.length);
-    await expect(range).toHaveValue("3600");
+    await expectControlValue(range, "3600");
     await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
     expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
     expect(requests.filter(request => request.path === "/api/snapshots/query")).toHaveLength(readCount);
@@ -294,8 +292,9 @@ test.describe("wall-time axis display", () => {
     await page.reload();
     await expect(chart.locator("canvas")).toBeVisible();
     expect((await paintedXAxis(chart)).every(label => /^\d{4}-\d{2}-\d{2}$/.test(label))).toBe(true);
-    await range.selectOption("custom");
-    await expect(page.getByRole("combobox", {name: "X-axis labels", exact: true})).toHaveValue("date");
+    await expectControlValue(page.getByRole("combobox", {name: "X-axis labels", exact: true}), "date");
+    await selectOption(range, "custom");
+    await expect(page.getByRole("dialog", {name: "Time settings", exact: true}).getByRole("combobox")).toHaveCount(0);
     await page.keyboard.press("Escape");
     await choose("auto");
     expect(new URL(page.url()).searchParams.has("time_format")).toBe(false);
@@ -310,8 +309,8 @@ test.describe("wall-time axis display", () => {
     const chart = page.locator(".chart-grid .chart-card");
     await expect(chart.locator("canvas")).toBeVisible();
     await chart.locator(".menu-trigger").click();
-    await chart.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
-    const editor = page.getByRole("dialog", {name: "Edit panel", exact: true});
+    await page.getByRole("menuitem", {name: "Edit chart", exact: true}).click();
+    const editor = page.getByRole("dialog", {name: /^Edit (chart|table|snapshot)$/, exact: true});
     await expect(editor.locator(".chart-preview canvas")).toBeVisible();
     const preview = await paintedXAxis(editor.locator(".chart-preview"));
     expect(preview.length).toBeGreaterThan(0);
@@ -324,16 +323,18 @@ test.describe("wall-time axis display", () => {
     await expect(chart.locator("canvas")).toBeVisible();
     expect((await paintedXAxis(chart)).some(label => /[dhms]/.test(label))).toBe(true);
     await page.setViewportSize({width: 320, height: 844});
-    await page.getByRole("combobox", {name: "Time range", exact: true}).selectOption("custom");
+    const axes = page.getByRole("radiogroup", {name: "X axis", exact: true});
+    await expect(page.getByRole("combobox", {name: "X-axis labels", exact: true})).toHaveCount(0);
+    await axes.getByRole("radio", {name: "Time", exact: true}).click();
+    const labels = page.getByRole("combobox", {name: "X-axis labels", exact: true});
+    await expect(labels).toBeEnabled(); await expectControlValue(labels, "date");
+    await selectOption(page.getByRole("combobox", {name: "Time range", exact: true}), "custom");
     const settings = page.getByRole("dialog", {name: "Time settings", exact: true});
-    const labels = settings.getByRole("combobox", {name: "X-axis labels", exact: true});
-    await expect(labels).toBeDisabled();
-    await settings.getByRole("combobox", {name: "Alignment", exact: true}).selectOption("wall_time");
-    await expect(labels).toBeEnabled(); await expect(labels).toHaveValue("date");
+    await expect(settings.getByRole("combobox")).toHaveCount(0);
     expect(await settings.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-    await settings.getByRole("combobox", {name: "Alignment", exact: true}).selectOption("optimizer_step");
-    await expect(labels).toBeDisabled();
-    await settings.getByRole("button", {name: "Apply time settings"}).click();
+    await page.keyboard.press("Escape");
+    await axes.getByRole("radio", {name: "Optimizer step", exact: true}).click();
+    await expect(labels).toHaveCount(0);
     await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").at(-1)?.body?.axis).toBe("optimizer_step");
     await expect(chart.locator("canvas")).toBeVisible();
     expect((await paintedXAxis(chart)).every(label => !/^\d{4}-\d{2}-\d{2}$|^\d{2}:\d{2}/.test(label))).toBe(true);

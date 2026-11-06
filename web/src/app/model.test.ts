@@ -1,5 +1,5 @@
 import {describe, expect, it, vi, afterEach} from "vitest";
-import {alignedData, cursorCoordinates, nearestIndex} from "./chart";
+import {alignedData, cursorCoordinates, nearestIndex} from "./chart-panel-model";
 import {axisLabel, defaultCharts, filteredRuns, filtersFrom, initialRange, metricName, partitionCatalogPaths, pointId, rangeBounds, reporters, routeFrom, RunColors, runColor, sameQueryRange, workspaceUrl} from "./model";
 import {matchingMetrics, metricEntries} from "./metric-catalog";
 import {parseExactJson} from "../core/exact-json";

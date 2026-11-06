@@ -1,3 +1,4 @@
+import {expectControlValue} from "./react-controls";
 import {test, expect} from "@playwright/test";
 import {mockApi, seedWorkspace, serverState, type FixtureOptions} from "./fixtures";
 
@@ -40,7 +41,7 @@ test("zoom committed outside the chart remains resettable and survives refresh",
     await expect.poll(() => requests.filter(request => request.path === "/api/snapshots/query").length, {timeout: 9000}).toBeGreaterThan(count);
     await expect(chart.locator(".chart-host")).toHaveAttribute("aria-description", zoom!);
     expect(await original!.evaluate(node => node.isConnected)).toBe(true);
-    await chart.locator(".menu-trigger").click(); await chart.getByRole("menuitem", {name: "Reset zoom"}).click();
+    await chart.locator(".menu-trigger").click(); await page.getByRole("menuitem", {name: "Reset zoom"}).click();
   }
 });
 
@@ -66,19 +67,19 @@ test("chart menus dismiss with Escape and outside clicks, and only one stays ope
   const summary = first.locator(".menu-trigger");
   await summary.click();
   await page.keyboard.press("Escape");
-  await expect(first.locator(".menu-content")).toBeHidden();
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await expect(summary).toBeFocused();
   await summary.click();
-  await page.locator(".appbar").click();
-  await expect(first.locator(".menu-content")).toBeHidden();
+  await page.locator(".runs-panel-header").click();
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await summary.click();
   const second = page.locator(".chart-card").nth(1).locator(".panel-actions");
   await second.locator(".menu-trigger").click();
-  await expect(second.locator(".menu-content")).toBeVisible();
-  await expect(page.locator(".menu-content:popover-open")).toHaveCount(1);
+  await expect(page.getByRole("menu")).toBeVisible();
+  await expect(page.getByRole("menu")).toHaveCount(1);
   await page.keyboard.press("Tab");
   await page.keyboard.press("Escape");
-  await expect(second.locator(".menu-content")).toBeHidden();
+  await expect(page.getByRole("menu")).toHaveCount(0);
 });
 
 test("long saved names fit narrow dialogs and replacement is explicit", async ({page}) => {
@@ -91,17 +92,18 @@ test("long saved names fit narrow dialogs and replacement is explicit", async ({
   await page.getByRole("button", {name: "Workspace sets"}).click();
   const sets = page.getByRole("dialog", {name: "Workspace sets", exact: true});
   await sets.getByRole("button", {name: "Save as…", exact: true}).click();
-  await sets.getByRole("textbox", {name: "Workspace set name"}).fill(name);
-  await sets.getByRole("button", {name: "Save workspace set", exact: true}).click();
+  const save = page.getByRole("dialog", {name: "Save workspace", exact: true});
+  await save.getByRole("textbox", {name: "Workspace set name"}).fill(name);
+  await save.getByRole("button", {name: "Save workspace set", exact: true}).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole("button", {name: "Workspace sets"}).click();
   expect(await sets.locator(".dialog-body").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
   await expect(sets.locator('[aria-current="true"]')).toHaveText(name);
   await sets.getByRole("button", {name: "Save as…", exact: true}).click();
-  await expect(sets.getByRole("textbox", {name: "Workspace set name"})).toHaveValue(name);
-  await sets.getByRole("textbox", {name: "Workspace set name"}).fill(name);
-  await expect(sets.getByRole("button", {name: "Update workspace set", exact: true})).toBeVisible();
+  await expectControlValue(save.getByRole("textbox", {name: "Workspace set name"}), name);
+  await save.getByRole("textbox", {name: "Workspace set name"}).fill(name);
+  await expect(save.getByRole("button", {name: "Update workspace set", exact: true})).toBeVisible();
   await page.screenshot({path: "artifacts/long-chart-set-mobile.png"});
-  await sets.getByRole("button", {name: "Update workspace set", exact: true}).click();
+  await save.getByRole("button", {name: "Update workspace set", exact: true}).click();
   expect((await serverState(page)).workspaces.sets.length).toBe(2);
 });

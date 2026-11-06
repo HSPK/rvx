@@ -1,6 +1,6 @@
 import {test, expect, type Page, type WebSocketRoute} from "@playwright/test";
 import {writeFile} from "node:fs/promises";
-import {mockApi, seedUiState, serverState, uiServer, type FixtureOptions} from "./fixtures";
+import {mockApi, seedUiState, serverState, uiServer, setTheme, openRunManagement, setPanelWidth, type FixtureOptions} from "./fixtures";
 import type {PanelSpec} from "../src/app/panels";
 
 async function seedPanels(page: Page, panels: PanelSpec[]): Promise<void> {
@@ -9,10 +9,9 @@ async function seedPanels(page: Page, panels: PanelSpec[]): Promise<void> {
 }
 const chart: PanelSpec = {id: "chart", kind: "chart", sectionId: "initial", path: "/pipeline/throughput", size: "normal"};
 const table: PanelSpec = {id: "table", kind: "snapshot-table", sectionId: "initial", path: "/tasks", size: "wide"};
-async function resizeChart(page: Page, label = "Make wide"): Promise<void> {
+async function resizeChart(page: Page, width = "wide"): Promise<void> {
   const card = page.locator('[data-panel-id="chart"]');
-  await card.getByRole("button", {name: /chart options$/}).click();
-  await card.getByRole("menuitem", {name: label, exact: true}).click();
+  await setPanelWidth(page, width, card);
 }
 
 test("stored layout restoration waits for authenticated bootstrap instead of flashing defaults", async ({page}) => {
@@ -22,7 +21,7 @@ test("stored layout restoration waits for authenticated bootstrap instead of fla
   await page.route("**/api/ui/state", async route => {await gate; await route.fallback();});
   try {
     await page.goto("/rvx?runs=run-1");
-    await expect(page.getByRole("heading", {name: "Loading workspace settings"})).toBeVisible();
+    await expect(page.getByRole("heading", {name: "Loading workspace…"})).toBeVisible();
     expect(requests).toHaveLength(0);
     await expect(page.locator(".chart-card")).toHaveCount(0);
     release();
@@ -49,7 +48,7 @@ test("bootstrap precedes stored layout, failure offers Retry and never writes a 
   failing = false; await page.locator(".preferences-notice").getByRole("button", {name: "Retry", exact: true}).click();
   await expect(page.locator(".workspace-picker")).toHaveText("Shared analysis");
   await expect(page.locator(".chart-card")).toHaveCount(1); expect(reads).toBeGreaterThan(1);
-  expect(await page.evaluate(() => localStorage.length)).toBe(0);
+  expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key !== "rvx-runs-panel-v1").length)).toBe(0);
 });
 
 test("one Save slot retains its baseline through pending saves and concurrent edits", async ({page}) => {
@@ -77,7 +76,7 @@ test("one Save slot retains its baseline through pending saves and concurrent ed
     await expect(page.locator(".workspace-save-slot button")).toHaveCount(0);
     expect((await page.locator(".workspace-save-slot").boundingBox())!).toEqual(savedBounds);
     await page.screenshot({path: "artifacts/server-save-pending.png"});
-    await resizeChart(page, "Normal width");
+    await resizeChart(page, "half");
     expect(submitted).toMatchObject({revision: 1, sets: [{panels: [{size: "wide"}]}]});
     await page.getByRole("button", {name: "Add", exact: true}).click();
     release();
@@ -102,7 +101,7 @@ test("uncertain saves retry exactly the same immutable mutation, even after more
   });
   await page.getByRole("button", {name: "Save current workspace"}).click();
   await expect(page.getByRole("button", {name: "Retry saving workspace"})).toBeVisible();
-  await resizeChart(page, "Normal width");
+  await resizeChart(page, "half");
   await page.getByRole("button", {name: "Retry saving workspace"}).click();
   await expect.poll(() => payloads.length).toBe(2); expect(payloads[1]).toBe(payloads[0]);
   await expect(page.getByRole("button", {name: "Save current workspace"})).toBeVisible();
@@ -114,7 +113,7 @@ test("fresh browsers share definitions, keep separate preferences, and explicitl
   const shared = uiServer(page);
   await page.goto("/rvx?runs=run-1");
   await expect(page.locator(".workspace-save-slot")).toHaveText("Saved");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await expect.poll(async () => (await serverState(page)).browser.theme).toBe("dark");
   shared.initialBrowser = {theme: "light", sidebar_width: 280, selected: {}, run_colors: {}};
   const context = await browser.newContext({baseURL: test.info().project.use.baseURL});
@@ -144,7 +143,7 @@ test("fresh browsers share definitions, keep separate preferences, and explicitl
     await expect(other.locator("html")).toHaveAttribute("data-theme", "light");
     await other.getByRole("button", {name: "Workspace sets"}).click();
     await expect(other.getByRole("button", {name: "My preserved copy", exact: true})).toBeVisible();
-    expect(await page.evaluate(() => localStorage.length)).toBe(0);
+    expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key !== "rvx-runs-panel-v1").length)).toBe(0);
     expect((await page.context().cookies()).find(cookie => cookie.name === "rvx_browser")?.httpOnly).toBe(true);
   } finally {await context.close();}
 });
@@ -166,12 +165,12 @@ test("sidebar pointer and keyboard resizing commits server width and preserves d
   await separator.focus(); await page.keyboard.press("End");
   await expect.poll(async () => (await serverState(page)).browser.sidebar_width).toBe(520);
   await page.setViewportSize({width: 901, height: 900});
-  expect((await dock.boundingBox())!.width).toBe(261);
+  expect((await dock.boundingBox())!.width).toBe(869);
   expect((await serverState(page)).browser.sidebar_width).toBe(520);
   await page.setViewportSize({width: 390, height: 844}); await expect(separator).toBeHidden();
-  await page.getByRole("button", {name: "Select runs (1 selected)"}).click();
-  await expect(page.getByRole("dialog", {name: "Runs", exact: true}).getByRole("separator")).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  await openRunManagement(page);
+  await expect(separator).toBeHidden();
+  await page.getByRole("button", {name: "Manage runs", exact: true}).click();
   await page.setViewportSize({width: 1440, height: 900});
   await expect.poll(async () => (await dock.boundingBox())!.width).toBe(520);
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
@@ -196,8 +195,8 @@ test("websocket is green only after a matching pong, then timeout/reconnect refr
   await expect(dot).toHaveAttribute("data-state", "connected");
   await expect(dot).toHaveAttribute("aria-label", /Connected · WebSocket RTT \d+ ms/);
   await dot.hover();
-  await expect(dot.locator(".connection-tooltip")).toBeVisible();
-  await expect(dot.locator(".connection-tooltip")).toHaveText(/Connected · WebSocket RTT \d+ ms/);
+  await expect(page.locator(".rvx-tooltip")).toBeVisible();
+  await expect(page.locator(".rvx-tooltip")).toHaveText(/Connected · WebSocket RTT \d+ ms/);
   await page.screenshot({path: "artifacts/server-websocket-rtt.png"});
   const before = requests.filter(request => request.path === "/api/ui/state").length;
   await page.clock.runFor(5000); await expect.poll(() => pings.length).toBe(2);
@@ -339,7 +338,7 @@ test("content-sized tables, rounded cards and unified padded title/unit render a
   await expect(page.locator(".preferences-notice")).toBeHidden();
   for (const width of [390, 901, 1440, 2560]) for (const theme of ["light", "dark"]) {
     await page.setViewportSize({width, height: 1000});
-    if (await page.locator("html").getAttribute("data-theme") !== theme) await page.getByRole("button", {name: `Switch to ${theme} appearance`}).click();
+    await setTheme(page, theme);
     const small = page.locator('[data-panel-id="small"]'), large = page.locator('[data-panel-id="large"]');
     await small.scrollIntoViewIfNeeded(); await expect(small.locator("tbody tr")).toHaveCount(2);
     const smallHeight = (await small.boundingBox())!.height;
@@ -352,19 +351,19 @@ test("content-sized tables, rounded cards and unified padded title/unit render a
     await title.scrollIntoViewIfNeeded(); await title.hover();
     const geometry = await title.evaluate(node => {
       const box = node.getBoundingClientRect(), card = node.closest(".chart-card")!.getBoundingClientRect(), unit = node.querySelector(".metric-unit")!.getBoundingClientRect(), style = getComputedStyle(node);
-      return {center: Math.abs((box.left + box.right - card.left - card.right) / 2), unitContained: unit.left >= box.left && unit.right <= box.right,
+      return {left: box.left - card.left, unitContained: unit.left >= box.left && unit.right <= box.right,
         paddingX: parseFloat(style.paddingLeft), paddingY: parseFloat(style.paddingTop), radius: parseFloat(getComputedStyle(node.closest(".chart-card")!).borderRadius)};
     });
-    expect(geometry.center).toBeLessThan(1); expect(geometry.unitContained).toBe(true);
-    expect(geometry.paddingX).toBeGreaterThanOrEqual(8); expect(geometry.paddingY).toBeGreaterThanOrEqual(6);
-    expect(geometry.radius).toBeGreaterThanOrEqual(6); expect(geometry.radius).toBeLessThanOrEqual(8);
+    expect(geometry.left).toBeLessThanOrEqual(16); expect(geometry.unitContained).toBe(true);
+    expect(geometry.paddingX).toBeGreaterThanOrEqual(4); expect(geometry.paddingY).toBeGreaterThanOrEqual(2);
+    expect(geometry.radius).toBeGreaterThanOrEqual(6); expect(geometry.radius).toBeLessThanOrEqual(11);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     measurements.push({width, theme, smallHeight, largeHeight, ...geometry});
     await page.screenshot({path: `artifacts/server-title-${width}-${theme}.png`});
   }
   const large = page.locator('[data-panel-id="large"]');
   await large.scrollIntoViewIfNeeded(); await large.getByRole("button", {name: /table options$/}).click();
-  await large.getByRole("menuitem", {name: "Fullscreen"}).click();
+  await page.getByRole("menuitem", {name: "Fullscreen"}).click();
   expect((await page.getByRole("dialog").locator(".table-card").boundingBox())!.height).toBeGreaterThan(850);
   await page.screenshot({path: "artifacts/server-table-fullscreen.png"});
   await writeFile("artifacts/server-ui-geometry.json", JSON.stringify(measurements, null, 2));
@@ -375,19 +374,18 @@ test("the RVX brand stays vertically centered and shares its mark with the favic
   await expect(page.locator(".brand")).toHaveAttribute("aria-label", "RVX");
   for (const width of [320, 390, 901, 1440]) for (const theme of ["light", "dark"]) {
     await page.setViewportSize({width, height: 900});
-    if (await page.locator("html").getAttribute("data-theme") !== theme) await page.getByRole("button", {name: `Switch to ${theme} appearance`}).click();
+    await setTheme(page, theme);
     const geometry = await page.locator(".brand").evaluate(node => {
       const image = node.querySelector<HTMLImageElement>(".brand-icon")!;
-      const box = image.getBoundingClientRect(), bar = node.closest(".appbar")!.getBoundingClientRect();
+      const box = image.getBoundingClientRect(), bar = node.closest(".runs-panel-header")!.getBoundingClientRect();
       return {width: box.width, height: box.height, center: Math.abs((box.top + box.bottom - bar.top - bar.bottom) / 2),
         transform: getComputedStyle(node).transform, gap: getComputedStyle(node).gap,
         favicon: new URL(document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href).pathname,
         source: new URL(image.currentSrc).pathname};
     });
-    expect(geometry).toMatchObject({width: 28, height: 28, transform: "none", gap: "7px"});
+    expect(geometry).toMatchObject({width: 32, height: 32, transform: "none", gap: "8px"});
     expect(geometry.center).toBeLessThanOrEqual(.5); expect(geometry.favicon).toBe(geometry.source);
-    if (width <= 380) await expect(page.locator(".brand-wordmark")).toBeHidden();
-    else await expect(page.locator(".brand-wordmark")).toBeVisible();
+    await expect(page.locator(".brand-wordmark")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({path: `artifacts/server-brand-${width}-${theme}.png`});
   }

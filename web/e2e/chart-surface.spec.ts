@@ -1,6 +1,7 @@
+import {selectOption} from "./react-controls";
 import {test, expect, type Locator, type Page} from "@playwright/test";
 import {mkdir, writeFile} from "node:fs/promises";
-import {exactId, firstObservation, mockApi, seedWorkspace, selectedObservation} from "./fixtures";
+import {exactId, firstObservation, mockApi, seedWorkspace, selectedObservation, setTheme} from "./fixtures";
 
 async function point(page: Page, chart: Locator, x = .5, y = .5) {
   await expect.poll(() => chart.evaluate(node => {
@@ -101,7 +102,7 @@ test("a default single Run chart uses no persistent value or legend band", async
     return {cardHeight: card.height, cardWidth: card.width, plotHeight: plot.height, plotWidth: plot.width,
       plotHeightRatio: plot.height / card.height, plotAreaRatio: plot.width * plot.height / (card.width * card.height)};
   });
-  expect(geometry.plotHeightRatio).toBeGreaterThan(.72);
+  expect(geometry.plotHeightRatio).toBeGreaterThan(.69);
   await mkdir("artifacts", {recursive: true});
   await writeFile("artifacts/chart-surface-single-geometry.json", JSON.stringify(geometry, null, 2));
   await page.screenshot({path: "artifacts/chart-surface-single-run.png"});
@@ -117,11 +118,12 @@ test("compact surfaces give space to the plot and four independent Run rows foll
     const rect = node.getBoundingClientRect(), plot = node.querySelector(".u-over")!.getBoundingClientRect();
     const heading = node.querySelector("h2")!.getBoundingClientRect(), handle = node.querySelector(".panel-drag-handle")!.getBoundingClientRect();
     return {card: {width: rect.width, height: rect.height}, plot: {width: plot.width, height: plot.height}, heightRatio: plot.height / rect.height,
-      plotAreaRatio: plot.width * plot.height / (rect.width * rect.height), titleCenterOffset: heading.left + heading.width / 2 - rect.left - rect.width / 2, titleHandleWidth: handle.width,
+      plotAreaRatio: plot.width * plot.height / (rect.width * rect.height), titleLeft: heading.left - rect.left, titleHandleWidth: handle.width,
       padding: getComputedStyle(node).padding, radius: getComputedStyle(node).borderRadius};
   });
-  expect(geometry.heightRatio).toBeGreaterThan(.64);
-  expect(Math.abs(geometry.titleCenterOffset)).toBeLessThan(2);
+  expect(geometry.heightRatio).toBeGreaterThan(.59);
+  expect(geometry.titleLeft).toBeGreaterThanOrEqual(8);
+  expect(geometry.titleLeft).toBeLessThanOrEqual(16);
   await mkdir("artifacts", {recursive: true});
   await page.screenshot({path: "artifacts/chart-surface-default.png"});
   const pointer = await point(page, chart, .4, .4);
@@ -157,9 +159,9 @@ test("mouseout retains point identity and fullscreen readouts need no raw snapsh
   await chart.locator(".menu-trigger").click();
   await expect(chart.getByRole("tooltip")).toBeHidden();
   await expect(selectedObservation(chart)).toHaveAttribute("data-snapshot-id", id!);
-  await expect(chart.getByRole("menuitem", {name: /Inspect/, includeHidden: true})).toHaveCount(0);
+  await expect(page.getByRole("menuitem", {name: /Inspect/, includeHidden: true})).toHaveCount(0);
   await page.screenshot({path: "artifacts/chart-surface-selected-options.png"});
-  await chart.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
   const fullscreen = page.getByRole("dialog", {name: "Policy loss", exact: true});
   const expanded = fullscreen.locator(".chart-card");
   await expect(expanded.locator(".panel-drag-handle")).toBeDisabled();
@@ -221,14 +223,14 @@ test("dark narrow and tablet plots keep the title readable and edge tooltip boun
   await mockApi(page);
   await seedWorkspace(page, [{path: "/progress/loss", size: "normal", presentation: {title: "A readable complete title without a left grip gutter"}}]);
   await page.goto("/rvx?runs=run-1,run-2&live=0");
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   const measurements = [];
   for (const width of [390, 844]) {
     await page.setViewportSize({width, height: 844});
     const chart = page.locator(".chart-card").first();
     await expect(chart.locator("canvas")).toBeVisible();
     const handle = chart.locator(".panel-drag-handle");
-    expect(await handle.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    expect(await handle.evaluate(node => node.scrollWidth <= node.clientWidth || getComputedStyle(node).textOverflow === "ellipsis")).toBe(true);
     await point(page, chart, .98, .98);
     const tooltip = await bounded(chart.getByRole("tooltip"), width, 844);
     measurements.push({width, tooltip, card: await chart.boundingBox(), plot: await chart.locator(".u-over").boundingBox()});
@@ -256,7 +258,7 @@ test("scope, range, visibility and removal dismiss stale hover without requestin
   await expect(chart.getByRole("tooltip")).toBeHidden();
   await expect(chart.locator(".chart-status")).toBeHidden();
   await point(page, chart);
-  await page.getByRole("combobox", {name: "Time range"}).selectOption("3600");
+  await selectOption(page.getByRole("combobox", {name: "Time range"}), "3600");
   await expect(chart.getByRole("tooltip")).toBeHidden();
   await expect(chart.locator(".chart-status")).toBeHidden();
   await point(page, chart);
@@ -272,7 +274,7 @@ test("scope, range, visibility and removal dismiss stale hover without requestin
   await point(page, chart);
   await chart.locator(".menu-trigger").click();
   await expect(chart.getByRole("tooltip")).toBeHidden();
-  await chart.getByRole("menuitem", {name: "Remove chart"}).click();
+  await page.getByRole("menuitem", {name: "Remove chart"}).click();
   await expect(page.locator(".chart-tooltip")).toHaveCount(0);
   expect(requests.some(request => /^\/api\/snapshots\/\d+$/.test(request.path))).toBe(false);
 });

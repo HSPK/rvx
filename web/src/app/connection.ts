@@ -1,12 +1,7 @@
-import {el} from "./ui";
 import {assertAuthenticated, AuthenticationRequired, requireAuthentication} from "../auth/session";
 
 /** Authenticated app-level heartbeat; only a matching pong establishes connectivity or RTT. */
-export class ConnectionStatus {
-  readonly element = el("button", "connection-status");
-  private announcement = el("span", "sr-only");
-  private label = el("span", "connection-label");
-  private tooltip = el("span", "connection-tooltip");
+export class ConnectionMonitor {
   private socket: WebSocket | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pending: {id: string; sent: number} | null = null;
@@ -14,14 +9,9 @@ export class ConnectionStatus {
   private attempts = 0;
   private sequence = 0;
   private connectedBefore = false;
+  private pageHidden = false;
   private state = "";
-  constructor(private reconnected: () => void) {
-    this.element.type = "button";
-    this.announcement.setAttribute("role", "status");
-    this.announcement.setAttribute("aria-live", "polite");
-    this.tooltip.setAttribute("role", "tooltip"); this.tooltip.setAttribute("aria-hidden", "true");
-    this.label.setAttribute("aria-hidden", "true");
-    this.element.append(this.label, el("i", "connection-dot"), this.announcement, this.tooltip);
+  constructor(private reconnected: () => void, private changed: (state: {state: string; text: string; label: string; announce: boolean}) => void) {
     this.update("connecting", "Connecting");
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {this.release(); this.update("offline", "Inactive while this page is hidden");}
@@ -29,19 +19,18 @@ export class ConnectionStatus {
     }, {signal: this.lifetime.signal});
     window.addEventListener("online", () => this.connect(), {signal: this.lifetime.signal});
     window.addEventListener("offline", () => {this.release(); this.update("offline", "Offline");}, {signal: this.lifetime.signal});
+    window.addEventListener("pagehide", () => {this.pageHidden = true; this.release();}, {signal: this.lifetime.signal});
+    window.addEventListener("pageshow", () => {this.pageHidden = false; this.connect();}, {signal: this.lifetime.signal});
   }
   start(): void {this.connect();}
   private update(state: string, text: string): void {
-    this.element.dataset.state = state; this.tooltip.textContent = text; this.element.setAttribute("aria-label", text);
     const label = state === "offline" ? text === "Sign in required" ? "Sign in" : navigator.onLine ? "Disconnected" : "Offline"
       : state === "connecting" && this.connectedBefore ? "Reconnecting" : "";
-    this.label.hidden = !label;
-    if (this.label.textContent !== label) this.label.textContent = label;
-    if (state !== this.state) this.announcement.textContent = text;
+    this.changed({state, text, label, announce: state !== this.state});
     this.state = state;
   }
   private connect(): void {
-    if (this.lifetime.signal.aborted || document.hidden || this.socket) return;
+    if (this.lifetime.signal.aborted || this.pageHidden || document.hidden || this.socket) return;
     try {assertAuthenticated();} catch (error) {if (error instanceof AuthenticationRequired) return; throw error;}
     if (!navigator.onLine) {this.update("offline", "Offline"); return;}
     this.clearTimer();

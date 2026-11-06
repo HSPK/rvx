@@ -1,6 +1,7 @@
+import {expectControlValue, selectOption} from "./react-controls";
 import {test, expect} from "@playwright/test";
 import {mkdir, writeFile} from "node:fs/promises";
-import {mockApi, runs} from "./fixtures";
+import {mockApi, runs, setTheme, openRunManagement} from "./fixtures";
 
 for (const runCount of [10_000, 50_000]) test(`${runCount.toLocaleString()}-run rail stays searchable and virtualized without unselected catalog reads`, async ({page}, testInfo) => {
   const requests = await mockApi(page, {runCount});
@@ -15,7 +16,7 @@ for (const runCount of [10_000, 50_000]) test(`${runCount.toLocaleString()}-run 
   expect(requests.some(request => request.path === "/api/charts/catalog" || request.path.startsWith("/api/snapshots/"))).toBe(false);
   const inputMs = await page.getByRole("searchbox", {name: "Search runs"}).evaluate(input => {
     const start = performance.now();
-    (input as HTMLInputElement).value = "training-05000";
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "training-05000");
     input.dispatchEvent(new Event("input", {bubbles: true}));
     return performance.now() - start;
   });
@@ -41,17 +42,18 @@ test("default selection stays within scope; filtering never changes selected tra
   expect(requests.filter(request => request.path === "/api/charts/catalog").every(request => JSON.stringify(request.body?.run_ids) === '["run-3"]')).toBe(true);
   await expect(page.locator(".chart-card").first().locator("canvas")).toBeVisible();
   const canvas = await page.locator(".chart-card").first().locator("canvas").elementHandle();
-  await page.getByRole("combobox", {name: "Experiment", exact: true}).selectOption("experiment-1");
-  await expect(page.locator(".run-row")).toHaveCount(3);
+  await selectOption(page.getByRole("combobox", {name: "Experiment", exact: true}), "experiment-1");
+  await expect(page.locator(".runs-selector")).toHaveAttribute("data-run-count", "3");
+  await expect(page.locator(".run-row")).toHaveCount(4);
   await expect(page.locator(".selection-count")).toHaveText("1 selected · 1 outside filters");
-  await expect(page.locator(".run-chip")).toContainText("ppo · small batch");
-  await expect(page.locator(".run-chip")).toContainText("outside filters");
+  await expect(page.locator(".run-row.selected")).toContainText("ppo · small batch");
+  await expect(page.locator(".run-row.selected")).toContainText("outside filters");
   expect(new URL(page.url()).searchParams.get("runs")).toBe("run-3");
   expect(await canvas!.evaluate(node => node.isConnected)).toBe(true);
   const before = requests.length;
   await page.goto("/rvx?project=does-not-exist");
   await expect(page.getByRole("heading", {name: "Select runs", exact: true})).toBeVisible();
-  await expect(page.getByRole("combobox", {name: "Project", exact: true})).toHaveValue("does-not-exist");
+  await expectControlValue(page.getByRole("combobox", {name: "Project", exact: true}), "does-not-exist");
   expect(new URL(page.url()).searchParams.get("runs")).toBe("");
   expect(requests.slice(before).some(request => request.path === "/api/charts/catalog")).toBe(false);
 });
@@ -87,22 +89,21 @@ test("desktop rail and mobile sheet share selection, with early light and dark c
   await expect(chart.locator("canvas")).toBeVisible();
   await expect(page.locator(".runs-dock")).toBeVisible();
   await page.screenshot({path: "artifacts/native-desktop-light.png"});
-  await page.getByRole("button", {name: "Switch to dark appearance"}).click();
+  await setTheme(page, "dark");
   await page.screenshot({path: "artifacts/native-desktop-dark.png"});
   await page.setViewportSize({width: 390, height: 844});
-  await expect(page.locator(".runs-dock")).toBeHidden();
+  await expect(page.locator(".runs-dock")).toBeVisible();
   expect((await chart.boundingBox())!.y).toBeLessThan(270);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({path: "artifacts/native-mobile-dark.png"});
-  await page.getByRole("button", {name: "Switch to light appearance"}).click();
+  await setTheme(page, "light");
   await page.screenshot({path: "artifacts/native-mobile-light.png"});
-  await page.getByRole("button", {name: "Select runs (2 selected)"}).click();
-  const sheet = page.getByRole("dialog", {name: "Runs", exact: true});
+  await openRunManagement(page);
+  const sheet = page.locator(".runs-dock");
   await expect(sheet.getByRole("checkbox", {name: "Select grpo · baseline"})).toBeChecked();
   expect(await page.locator(".runs-selector").count()).toBe(1);
   await page.screenshot({path: "artifacts/native-mobile-run-sheet.png"});
-  await sheet.getByRole("button", {name: "Close", exact: true}).click();
-  await page.locator('.run-chip[data-run-id="run-1"]').getByRole("button", {name: /^Run details/}).click();
+  await sheet.getByRole("button", {name: "Run details for grpo · warm-start", exact: true}).click();
   await expect(page.getByRole("dialog", {name: "Run details", exact: true})).toBeVisible();
   await page.screenshot({path: "artifacts/native-mobile-run-details.png"});
 });
@@ -123,9 +124,9 @@ test("320px always-refreshing workspaces and long run labels retain accessible c
     const options = (await page.getByRole("button", {name: "Workspace sets"}).boundingBox())!;
     expect(options.x + options.width).toBeLessThanOrEqual(width);
     if (width === 320) await page.screenshot({path: "artifacts/native-320-paused.png"});
-    await page.getByRole("button", {name: "Select runs (1 selected)"}).click();
+    await openRunManagement(page);
     await expect(page.getByRole("checkbox", {name: `Select ${longName}`})).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", {name: "Runs", exact: true})).toHaveCount(0);
+    await page.getByRole("button", {name: "Manage runs", exact: true}).click();
+    await expect(page.getByRole("button", {name: "Manage runs", exact: true})).toHaveAttribute("aria-expanded", "false");
   }
 });

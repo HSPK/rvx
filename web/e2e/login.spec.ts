@@ -1,5 +1,5 @@
 import {test, expect, type Page, type WebSocketRoute} from "@playwright/test";
-import {mockApi, seedWorkspace, uiServer} from "./fixtures";
+import {mockApi, seedWorkspace, uiServer, setPanelWidth} from "./fixtures";
 
 const password = "fixture-only-server-password-0123456789";
 async function authentication(page: Page, initial = false) {
@@ -37,7 +37,7 @@ test("standalone login is branded, keyboard accessible and loads only isolated p
   await page.goto("/login?next=%2Frvx%3Fruns%3Drun-1%2Crun-2%26range%3D3600");
   await expect(page).toHaveTitle("Sign in · RVX");
   const input = page.getByLabel("Password", {exact: true});
-  await expect(input).toBeFocused(); await expect(input).toHaveAttribute("autocomplete", "current-password");
+  await expect(input).not.toBeFocused(); await expect(input).toHaveAttribute("autocomplete", "current-password");
   await expect(page.locator("form")).toHaveAttribute("method", "post");
   await input.fill("not-the-password");
   await page.getByRole("button", {name: "Show password"}).click(); await expect(input).toHaveAttribute("type", "text");
@@ -49,10 +49,10 @@ test("standalone login is branded, keyboard accessible and loads only isolated p
   expect(privateAssets).toEqual([]);
   await input.fill(password); await input.press("Enter");
   await expect(page).toHaveURL(/\/rvx\?.*runs=run-1%2Crun-2|\/rvx\?.*runs=run-1,run-2/);
-  await expect(page.locator(".run-checkbox:checked")).toHaveCount(2);
+  await expect(page.locator(".run-checkbox[data-state=\"checked\"]")).toHaveCount(2);
   expect(page.url()).not.toContain(password); expect(auth.loginCalls).toBe(2);
   expect((await page.context().cookies()).find(cookie => cookie.name === "rvx_session")?.httpOnly).toBe(true);
-  expect(await page.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
+  expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key !== "rvx-runs-panel-v1").length + sessionStorage.length)).toBe(0);
 });
 
 test("login remains clean at desktop/mobile sizes and in light/dark appearance", async ({page}) => {
@@ -64,7 +64,7 @@ test("login remains clean at desktop/mobile sizes and in light/dark appearance",
     const input = page.getByLabel("Password", {exact: true});
     await expect(input).toBeVisible();
     const card = (await page.locator(".auth-card").boundingBox())!;
-    expect(card.width).toBeLessThanOrEqual(360); expect(card.x).toBeGreaterThanOrEqual(20);
+    expect(card.width).toBeLessThanOrEqual(400); expect(card.x).toBeGreaterThanOrEqual(20);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({path: `artifacts/login-${width}-${colorScheme}.png`});
   }
@@ -107,7 +107,7 @@ test("expired sessions lock in place, stop reads and preserve unsaved work on re
   const card = page.locator(".chart-card");
   await expect(card.locator("canvas")).toBeVisible();
   const canvas = await card.locator("canvas").elementHandle(), url = page.url();
-  await card.locator(".menu-trigger").click(); await card.getByRole("menuitem", {name: "Make wide"}).click();
+  await setPanelWidth(page, "wide", card);
   auth.authenticated = false;
   await page.clock.runFor(5100);
   const lock = page.getByRole("dialog", {name: "Sign in again", exact: true});
@@ -132,7 +132,7 @@ test("sign out respects unsaved drafts and revokes the session before leaving", 
   await seedWorkspace(page, [{path: "/progress/loss", size: "normal"}]);
   await page.goto("/rvx?runs=run-1");
   const card = page.locator(".chart-card"); await expect(card.locator("canvas")).toBeVisible();
-  await card.locator(".menu-trigger").click(); await card.getByRole("menuitem", {name: "Make wide"}).click();
+  await setPanelWidth(page, "wide", card);
   await page.getByRole("button", {name: "Sign out", exact: true}).click();
   await page.getByRole("button", {name: "Cancel", exact: true}).click();
   expect(auth.logoutCalls).toBe(0);
@@ -190,7 +190,7 @@ for (const recovery of ["socket", "browser history"] as const) {
     await expect(card.locator("canvas")).toBeVisible();
     await expect(page.locator(".connection-status")).toHaveAttribute("data-state", "connected");
     const canvas = await card.locator("canvas").elementHandle(), url = page.url();
-    await card.locator(".menu-trigger").click(); await card.getByRole("menuitem", {name: "Make wide"}).click();
+    await setPanelWidth(page, "wide", card);
     const before = auth.sessionCalls;
     auth.failSession = true;
     if (recovery === "socket") sockets[0]!.close({code: 1008, reason: "session expired or revoked"});

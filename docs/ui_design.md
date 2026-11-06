@@ -658,6 +658,10 @@ All Run selections use the same chart components and query path.
 Components own their observers, listeners, timers, and cancellation. Prefer
 small, coherent responsibilities over a large shell class or a generic plugin
 framework. Shared primitives belong below views, not inside another view.
+Views use React with the shared Tailwind/Radix primitives and Lucide icons
+adapted from Experiment Tracker. Do not mount imperative view controllers
+inside React hosts; imperative APIs are confined to chart rendering, transport,
+and browser integration.
 
 Performance requirements:
 

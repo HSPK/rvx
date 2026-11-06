@@ -2,10 +2,7 @@ import {describe, expect, it} from "vitest";
 import type {SnapshotAggregateGroup, SnapshotAggregateValue, SnapshotBarView, SnapshotRecordsResponse, SnapshotStatusView} from "../../domain/snapshot-views";
 import type {TableCell} from "../../domain/tables";
 import type {SnapshotVisualPanelSpec} from "../panels";
-import {barGeometry, barMeasures} from "./bar";
-import {cellText, finiteNumber} from "./details";
-import {nativeFilters, visualQueryKey} from "./panel";
-import {gridGeometry, statusColor, statusKey, statusTasks} from "./status";
+import {barGeometry, barMeasures, cellText, finiteNumber, nativeFilters, visualQueryKey, gridGeometry, statusColor, statusKey, statusTasks} from "./react-model";
 
 const cell = (text: string, kind: TableCell["kind"] = "number"): TableCell => ({kind, text, truncated: false});
 const aggregate = (text: string, kind: TableCell["kind"] = "number"): SnapshotAggregateValue => ({value: cell(text, kind), count: 1, missing: 0, non_numeric: 0, approximate: false});

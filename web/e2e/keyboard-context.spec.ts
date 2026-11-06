@@ -44,8 +44,9 @@ test("chart edits preserve keyboard focus on the affected or adjacent control", 
   await expect(loss.locator("canvas")).toBeVisible();
   const summary = loss.locator(".menu-trigger");
   await summary.click();
-  await loss.getByRole("menuitem", {name: "Make wide"}).focus();
+  await page.getByRole("menuitem", {name: "Edit chart"}).focus();
   await page.keyboard.press("Enter");
+  await page.getByRole("dialog", {name: "Edit chart", exact: true}).getByRole("button", {name: "Save changes", exact: true}).click();
   await expect(summary).toBeFocused();
   await summary.click();
   await page.keyboard.press("Escape");
@@ -55,7 +56,7 @@ test("chart edits preserve keyboard focus on the affected or adjacent control", 
   while (await page.locator(".chart-card").count()) {
     const first = page.locator(".chart-card").first();
     await first.locator(".menu-trigger").click();
-    await first.getByRole("menuitem", {name: "Remove chart"}).click();
+    await page.getByRole("menuitem", {name: "Remove chart"}).click();
     if (await page.locator(".chart-card").count()) await expect(page.locator(".chart-card").first().locator(".menu-trigger")).toBeFocused();
     else await expect(page.getByRole("button", {name: "Add", exact: true})).toBeVisible();
   }

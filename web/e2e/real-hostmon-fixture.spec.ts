@@ -51,7 +51,7 @@ test("real Hostmon replay tables remain useful despite partial collection discov
   expect(values).toHaveLength(52);
   expect(values).toEqual([...values].sort((a, b) => b - a));
   await table.locator(".menu-trigger").click();
-  await table.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
+  await page.getByRole("menuitem", {name: "Fullscreen", exact: true}).click();
   const fullscreen = page.locator(".panel-fullscreen");
   await expect(fullscreen.locator("tbody tr")).toHaveCount(52);
   await page.screenshot({path: "artifacts/real-hostmon-workloads-fullscreen.png"});

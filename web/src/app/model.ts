@@ -17,6 +17,9 @@ export const panelWidthChoices: [PanelSize, string][] = [
   ["normal", "Normal"], ["quarter", "1/4"], ["third", "1/3"], ["half", "1/2"],
   ["two-thirds", "2/3"], ["three-quarters", "3/4"], ["wide", "Wide"],
 ];
+export const chartWidthChoices: readonly (readonly [PanelSize, string])[] = [
+  ["quarter", "1/4"], ["third", "1/3"], ["half", "1/2"], ["wide", "1/1"],
+];
 export function validPanelSize(value: unknown): value is PanelSize {return panelWidthChoices.some(([size]) => size === value);}
 export interface ChartSpec {path: string; paths?: string[]; size: PanelSize; presentation?: ChartPresentation}
 export interface RangeState {axis: string; window: string; from?: number; to?: number; timeFormat?: TimeAxisFormat}

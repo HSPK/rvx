@@ -1,0 +1,42 @@
+@import "@fontsource-variable/geist";
+
+:root {
+  font-family: "Geist Variable", sans-serif;
+  font-size: 16px;
+  --background: #f3f4f6;
+  --foreground: oklch(0.145 0 0);
+  --card: #fff;
+  --surface: var(--card);
+  --text: var(--foreground);
+  --muted: oklch(0.556 0 0);
+  --muted-surface: oklch(0.97 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --line: oklch(0.922 0 0);
+  --chart-line: #e2e6ed;
+  --accent: var(--primary);
+  --hover: var(--muted-surface);
+  --ring: oklch(0.708 0 0);
+  --radius: 0.375rem;
+  --error: #b54b40;
+  --shadow: 0 4px 16px rgb(0 0 0 / 8%);
+  color: var(--foreground);
+  background: var(--background);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --background: #0e1014;
+  --foreground: oklch(0.985 0 0);
+  --card: #181b21;
+  --muted: oklch(0.708 0 0);
+  --muted-surface: oklch(0.269 0 0);
+  --primary: #9baaff;
+  --primary-foreground: #141a36;
+  --secondary: oklch(0.269 0 0);
+  --line: oklch(1 0 0 / 10%);
+  --chart-line: #292d35;
+  --ring: oklch(0.556 0 0);
+  --error: #f19184;
+  color-scheme: dark;
+}

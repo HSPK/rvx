@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {activeTableFilters, chartPanel, copyLayout, emptyLayout, movePanel, removeSection, sectionLimit, tableColumnLimit, validFilterGroups, validLayout, type TableFilterGroup} from "./panels";
-import {collectionLabel, compareCells, pageCsv, filterSummaryRows, type ViewRow} from "./table-view";
+import {collectionLabel, compareCells, pageCsv, filterSummaryRows, type ViewRow} from "./data-table-model";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("persistent independent panels and sections", () => {
